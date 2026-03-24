@@ -1,11 +1,12 @@
 [project]
 name = "yamibo-scraper"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "A simple tool for yuri lovers"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "beautifulsoup4>=4.14.3",
     "curl-cffi>=0.14.0",
     "ebooklib>=0.20",
+    "opencc-python-reimplemented>=0.1.7",
 ]
