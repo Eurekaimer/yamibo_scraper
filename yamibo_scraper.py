@@ -3,6 +3,7 @@
 import time
 import re
 import random
+import json
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 from bs4 import BeautifulSoup
@@ -21,6 +22,8 @@ from cli import (
     get_auth_mode,
     print_terminal_encoding_hint,
     edit_config_interactive,
+    ask_use_existing_txt_for_epub,
+    ask_retry_failed_chapters,
 )
 
 # ================= 1. 全局配置区 =================
@@ -30,6 +33,7 @@ OUTPUT_DIR = Path("./output")
 CRAWL_DELAY = 3
 MAX_RETRIES = 5
 ENABLE_SIMPLIFIED = True
+FAILED_MARKER_PREFIX = "#FAILED_CHAPTER_"
 
 cc = OpenCC('t2s')  # 繁体转简体
 
@@ -131,6 +135,66 @@ def save_to_epub(chapters, filename, title, author):
     print(f"📚 EPUB 文件已保存至: {filename}")
 
 
+def parse_chapters_from_txt(filename: Path) -> list[dict]:
+    if not filename.exists():
+        return []
+
+    content = filename.read_text(encoding="utf-8")
+    pattern = re.compile(r"==== (.*?) ====\n\n(.*?)(?=\n\n\n==== |\Z)", re.S)
+    chapters = []
+    for title, body in pattern.findall(content):
+        chapters.append({
+            "title": title.strip(),
+            "url": "",
+            "content": body.strip(),
+        })
+    return chapters
+
+
+def dump_failed_chapters(failed_records: list[dict], output_file: Path) -> None:
+    output_file.write_text(
+        json.dumps(failed_records, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    print(f"🗂️ 失败章节记录已保存：{output_file}")
+
+
+def retry_failed_chapters(scraper: YamiboScraper, failed_file: Path, txt_file: Path) -> list[dict]:
+    if not failed_file.exists():
+        print("未找到失败章节记录文件，跳过重试。")
+        return []
+    if not txt_file.exists():
+        print("未找到 TXT 文件，无法执行回填。")
+        return []
+
+    records = json.loads(failed_file.read_text(encoding="utf-8"))
+    txt_content = txt_file.read_text(encoding="utf-8")
+    still_failed = []
+
+    print("\n开始重试失败章节并回填 TXT ...")
+    for item in records:
+        marker = item["marker"]
+        print(f"🔁 重试：{item['title']}")
+        new_content = scraper.fetch_chapter_content(item["url"])
+        if new_content.startswith("【最终失败"):
+            still_failed.append(item)
+            print("   ❌ 仍失败，保留标记。")
+            continue
+
+        txt_content = txt_content.replace(marker, new_content, 1)
+        print("   ✅ 回填成功。")
+        time.sleep(1)
+
+    txt_file.write_text(txt_content, encoding="utf-8")
+    if still_failed:
+        dump_failed_chapters(still_failed, failed_file)
+    else:
+        failed_file.unlink(missing_ok=True)
+        print("🎉 失败章节全部回填成功，失败记录文件已移除。")
+
+    return still_failed
+
+
 # ================= 5. 主程序 =================
 
 def build_authenticated_session(config):
@@ -193,6 +257,17 @@ def resolve_chapters(scraper: YamiboScraper, config) -> list:
 
 def run_scraper(config):
     save_choice = get_save_choice()
+    txt_path = OUTPUT_DIR / f"{config.book_title}.txt"
+    epub_path = OUTPUT_DIR / f"{config.book_title}.epub"
+
+    if save_choice == "2" and txt_path.exists() and ask_use_existing_txt_for_epub(txt_path):
+        chapters = parse_chapters_from_txt(txt_path)
+        if not chapters:
+            print("❌ TXT 解析失败，无法直接转换 EPUB，请改为重新抓取。")
+            return
+        save_to_epub(chapters, epub_path, config.book_title, config.book_author)
+        return
+
     session = build_authenticated_session(config)
     if not session:
         return
@@ -206,13 +281,20 @@ def run_scraper(config):
         print("未解析到任何章节，请检查 raw_html_catalog 内容，或检查搜索结果。")
         return
 
-    failed = []
+    failed_records = []
 
     for i, ch in enumerate(chapters):
         content = scraper.fetch_chapter_content(ch['url'])
 
         if content.startswith("【最终失败"):
-            failed.append(ch['title'])
+            marker = f"{FAILED_MARKER_PREFIX}{i + 1}#"
+            failed_records.append({
+                "index": i,
+                "title": ch["title"],
+                "url": ch["url"],
+                "marker": marker,
+            })
+            content = marker
 
         ch['content'] = content
 
@@ -226,15 +308,29 @@ def run_scraper(config):
     print("\n抓取结束，开始生成文件...")
 
     if save_choice in ['1', '3']:
-        save_to_txt(chapters, OUTPUT_DIR / f"{config.book_title}.txt")
+        save_to_txt(chapters, txt_path)
 
     if save_choice in ['2', '3']:
-        save_to_epub(chapters, OUTPUT_DIR / f"{config.book_title}.epub", config.book_title, config.book_author)
+        save_to_epub(chapters, epub_path, config.book_title, config.book_author)
 
-    if failed:
-        print(f"\n⚠️ 有 {len(failed)} 个章节抓取失败:")
-        for f in failed:
-            print(f" - {f}")
+    if failed_records:
+        failed_file = OUTPUT_DIR / f"{config.book_title}.failed_chapters.json"
+        dump_failed_chapters(failed_records, failed_file)
+
+        print(f"\n⚠️ 有 {len(failed_records)} 个章节抓取失败:")
+        for item in failed_records:
+            print(f" - {item['title']}")
+
+        if save_choice in ["1", "3"] and ask_retry_failed_chapters():
+            still_failed = retry_failed_chapters(scraper, failed_file, txt_path)
+            if save_choice == "3":
+                updated_chapters = parse_chapters_from_txt(txt_path)
+                if updated_chapters:
+                    save_to_epub(updated_chapters, epub_path, config.book_title, config.book_author)
+                else:
+                    print("⚠️ TXT 回填后解析失败，EPUB 未重新生成。")
+            if still_failed:
+                print(f"⚠️ 仍有 {len(still_failed)} 章失败，已保留失败记录文件便于后续继续执行。")
     else:
         print("\n🎉 全部操作完美完成！")
 

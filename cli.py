@@ -85,6 +85,27 @@ def choose_thread(results: list[dict]) -> dict | None:
         print("输入无效，请重新输入。")
 
 
+def ask_use_existing_txt_for_epub(txt_path: Path) -> bool:
+    print(f"\n检测到同名 TXT 文件：{txt_path}")
+    while True:
+        choice = input("是否直接使用该 TXT 转换为 EPUB（跳过重新抓取）？(y/n): ").strip().lower()
+        if choice in {"y", "yes"}:
+            return True
+        if choice in {"n", "no"}:
+            return False
+        print("输入无效，请输入 y 或 n。")
+
+
+def ask_retry_failed_chapters() -> bool:
+    while True:
+        choice = input("检测到失败章节，是否立即重试并回填 TXT？(y/n): ").strip().lower()
+        if choice in {"y", "yes"}:
+            return True
+        if choice in {"n", "no"}:
+            return False
+        print("输入无效，请输入 y 或 n。")
+
+
 def print_terminal_encoding_hint() -> None:
     print("\n[提示] 若终端中文乱码，请切换到 UTF-8 编码终端后重试。")
     print("Windows PowerShell 可先执行: chcp 65001")
