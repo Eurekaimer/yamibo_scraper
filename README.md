@@ -58,9 +58,20 @@ uv sync
 
 ## 运行
 
-```bash
-uv run yamibo_scraper.py
-```
+- `auth.py`：登录与会话初始化
+- `search.py`：关键词搜索帖子
+- `cli.py`：终端交互
+- `config_store.py`：本地配置加载与保存
+
+说明：搜索后“自动解析目标帖子目录”还在开发中，当前会回退到 `raw_html_catalog`。
+
+---
+
+## 常见问题
+
+### 1) 为什么还有 Cookie 登录？
+
+账号密码登录是默认推荐方式；保留 Cookie 模式是为了兼容验证码、风控或页面结构变化等情况。
 
 运行后流程：
 
