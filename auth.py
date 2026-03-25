@@ -48,22 +48,34 @@ def _extract_login_form(session: requests.Session) -> tuple[str, str]:
     response.raise_for_status()
 
     soup = BeautifulSoup(response.content, "html.parser")
-    login_form = soup.find("form", id="loginform_Lz0") or soup.find("form", id="loginform")
-    if not login_form:
-        raise RuntimeError("未找到登录表单，请检查论坛页面结构是否变化")
+    login_form = (
+        soup.find("form", id="loginform_Lz0")
+        or soup.find("form", id="loginform")
+        or soup.find("form", attrs={"action": re.compile(r"mod=logging.*action=login")})
+        or soup.find("form", attrs={"id": re.compile(r"login", re.IGNORECASE)})
+    )
 
-    action = login_form.get("action", "")
-    action_url = urljoin(BASE_URL, action)
+    action_url = ""
+    if login_form:
+        action = login_form.get("action", "")
+        action_url = urljoin(BASE_URL, action)
 
-    formhash_el = login_form.find("input", attrs={"name": "formhash"})
-    if formhash_el and formhash_el.get("value"):
-        return action_url, formhash_el["value"]
+        formhash_el = login_form.find("input", attrs={"name": "formhash"})
+        if formhash_el and formhash_el.get("value"):
+            return action_url, formhash_el["value"]
+
+    page_formhash_el = soup.find("input", attrs={"name": "formhash"})
+    if page_formhash_el and page_formhash_el.get("value"):
+        fallback_action = action_url or urljoin(
+            BASE_URL, "member.php?mod=logging&action=login&loginsubmit=yes"
+        )
+        return fallback_action, page_formhash_el["value"]
 
     formhash_match = re.search(r'formhash"\s+value="([a-zA-Z0-9]+)"', response.text)
     if formhash_match:
         return action_url, formhash_match.group(1)
 
-    raise RuntimeError("未找到 formhash，无法提交登录")
+    raise RuntimeError("未找到可用的登录 formhash，请检查论坛页面结构或登录页是否受限")
 
 
 def login_with_password(session: requests.Session, username: str, password: str) -> bool:
@@ -89,6 +101,7 @@ def login_with_password(session: requests.Session, username: str, password: str)
     if profile_check.status_code == 200 and username in profile_check.text:
         return True
 
-    # 兜底：Discuz 常见登录 Cookie 命名
+    # 兜底：仅接受明确的登录态 Cookie，避免匿名 saltkey 误判为登录成功
     cookie_names = {c.name.lower() for c in session.cookies}
-    return any("auth" in c or "saltkey" in c for c in cookie_names)
+    has_auth_cookie = any(c.endswith("_auth") or c == "auth" for c in cookie_names)
+    return has_auth_cookie
