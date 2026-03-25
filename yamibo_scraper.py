@@ -5,15 +5,18 @@ import re
 import random
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
-from curl_cffi import requests
 from bs4 import BeautifulSoup
 from ebooklib import epub
 from opencc import OpenCC
 
+from auth import AuthConfig, create_session
+from search import search_threads_by_keyword
+from cli import get_save_choice, get_catalog_mode, get_search_keyword, choose_thread
+
 # ================= 1. 全局配置区 =================
 
 YOUR_COOKIE_STRING = "Your Cookie"
-YOUR_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36" 
+YOUR_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
 
 BOOK_TITLE = "TITLE"
 BOOK_AUTHOR = "AUTHOR"
@@ -31,20 +34,16 @@ RAW_HTML_CATALOG = """ HTML """
 
 # ================= 3. 核心类 =================
 
+
 class YamiboScraper:
-    def __init__(self, cookie: str, user_agent: str):
-        self.session = requests.Session(impersonate="chrome110")
-        self.session.headers.update({
-            'User-Agent': user_agent,
-            'Cookie': cookie,
-            'Referer': 'https://bbs.yamibo.com/forum.php'
-        })
+    def __init__(self, auth: AuthConfig):
+        self.session = create_session(auth)
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     def parse_catalog(self, html_text: str) -> list:
         chapters = []
         pattern = re.compile(r'<a href="(https://bbs\.yamibo\.com/[^"]+)"[^>]*>(.*?)</a>')
-        
+
         for url, title in pattern.findall(html_text):
             title = re.sub('<.*?>', '', title).strip()  # 去掉 <strong>
             chapters.append({
@@ -84,13 +83,14 @@ class YamiboScraper:
                 return text
 
             except Exception as e:
-                print(f"    ⚠️ 第{attempt+1}次失败: {e}")
-                
+                print(f"    ⚠️ 第{attempt + 1}次失败: {e}")
+
                 if attempt == MAX_RETRIES - 1:
                     return f"【最终失败：{e}】"
-                
+
                 sleep_time = 2 ** attempt
                 time.sleep(sleep_time)
+
 
 # ================= 4. 文件输出 =================
 
@@ -99,6 +99,7 @@ def save_to_txt(chapters, filename):
         for c in chapters:
             f.write(f"==== {c['title']} ====\n\n{c['content']}\n\n\n")
     print(f"📄 TXT 文件已保存至: {filename}")
+
 
 def save_to_epub(chapters, filename, title, author):
     book = epub.EpubBook()
@@ -109,7 +110,7 @@ def save_to_epub(chapters, filename, title, author):
 
     for i, c in enumerate(chapters):
         chapter = epub.EpubHtml(title=c['title'], file_name=f'chap_{i}.xhtml')
-        
+
         html = f"<h1>{c['title']}</h1>"
         for line in c['content'].split('\n'):
             if line.strip():
@@ -121,7 +122,7 @@ def save_to_epub(chapters, filename, title, author):
 
     # 1. 设置内部的 TOC（目录）结构
     book.toc = tuple(epub_chapters)
-    
+
     # 2. ⚠️ 关键修复：显式添加 NCX 和 Nav 导航项，阅读器才能解析出目录侧边栏
     book.add_item(epub.EpubNcx())
     book.add_item(epub.EpubNav())
@@ -130,35 +131,40 @@ def save_to_epub(chapters, filename, title, author):
     book.spine = ['nav'] + epub_chapters
 
     # 生成 EPUB 文件
-    epub.write_epub(filename, book, {} )
+    epub.write_epub(filename, book, {})
     print(f"📚 EPUB 文件已保存至: {filename}")
+
 
 # ================= 5. 主程序 =================
 
-def get_save_choice():
-    print("="*30)
-    print("请选择要保存的文件格式：")
-    print("1. 只保存 TXT 格式")
-    print("2. 只保存 EPUB 格式")
-    print("3. 同时保存 TXT 和 EPUB")
-    print("="*30)
-    
-    while True:
-        choice = input("请输入对应数字 (1/2/3): ").strip()
-        if choice in ['1', '2', '3']:
-            return choice
-        print("输入无效，请重新输入 1、2 或 3。")
+def resolve_chapters(scraper: YamiboScraper) -> list:
+    mode = get_catalog_mode()
+
+    if mode == "1":
+        return scraper.parse_catalog(RAW_HTML_CATALOG)
+
+    keyword = get_search_keyword()
+    results = search_threads_by_keyword(scraper.session, keyword)
+    selected = choose_thread(results)
+
+    if not selected:
+        return []
+
+    print("\n当前骨架版本提示：自动抓取目标帖子目录尚未接入，先回退到 RAW_HTML_CATALOG。")
+    return scraper.parse_catalog(RAW_HTML_CATALOG)
+
 
 def main():
     # 程序一开始先询问保存格式
     save_choice = get_save_choice()
     print("\n配置完成，开始抓取目录...")
 
-    scraper = YamiboScraper(YOUR_COOKIE_STRING, YOUR_USER_AGENT)
-    chapters = scraper.parse_catalog(RAW_HTML_CATALOG)
+    auth = AuthConfig(cookie=YOUR_COOKIE_STRING, user_agent=YOUR_USER_AGENT)
+    scraper = YamiboScraper(auth)
+    chapters = resolve_chapters(scraper)
 
     if not chapters:
-        print("未解析到任何章节，请检查 RAW_HTML_CATALOG 内容。")
+        print("未解析到任何章节，请检查 RAW_HTML_CATALOG 内容，或检查搜索结果。")
         return
 
     failed = []
@@ -175,7 +181,7 @@ def main():
         clean_text = re.sub(r'\s+', '', content)
         preview = clean_text[:20] + "..." if len(clean_text) > 20 else clean_text
 
-        print(f"[{i+1}/{len(chapters)}] {ch['title']} | 预览: {preview}")
+        print(f"[{i + 1}/{len(chapters)}] {ch['title']} | 预览: {preview}")
 
         time.sleep(CRAWL_DELAY + random.uniform(0, 2))
 
@@ -184,7 +190,7 @@ def main():
     # 根据用户的输入执行对应的保存操作
     if save_choice in ['1', '3']:
         save_to_txt(chapters, OUTPUT_DIR / f"{BOOK_TITLE}.txt")
-    
+
     if save_choice in ['2', '3']:
         save_to_epub(chapters, OUTPUT_DIR / f"{BOOK_TITLE}.epub", BOOK_TITLE, BOOK_AUTHOR)
 
@@ -194,6 +200,7 @@ def main():
             print(f" - {f}")
     else:
         print("\n🎉 全部操作完美完成！")
+
 
 if __name__ == "__main__":
     main()
