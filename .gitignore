@@ -14,3 +14,4 @@ wheels/
 output/
 *.txt
 *.epub
+yamibo_config.json
