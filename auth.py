@@ -73,7 +73,10 @@ def _extract_login_form(session: requests.Session) -> tuple[str, str]:
 
     formhash_match = re.search(r'formhash"\s+value="([a-zA-Z0-9]+)"', response.text)
     if formhash_match:
-        return action_url, formhash_match.group(1)
+        fallback_action = action_url or urljoin(
+            BASE_URL, "member.php?mod=logging&action=login&loginsubmit=yes"
+        )
+        return fallback_action, formhash_match.group(1)
 
     raise RuntimeError("未找到可用的登录 formhash，请检查论坛页面结构或登录页是否受限")
 
