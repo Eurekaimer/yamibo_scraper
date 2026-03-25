@@ -56,8 +56,6 @@ class YamiboScraper:
 
     def fetch_chapter_content(self, url: str) -> str:
         pid = parse_qs(urlparse(url).query).get('pid', [None])[0]
-        if not pid:
-            return "【PID失败】"
 
         for attempt in range(MAX_RETRIES):
             try:
@@ -65,8 +63,11 @@ class YamiboScraper:
                 response.raise_for_status()
 
                 soup = BeautifulSoup(response.content, 'html.parser')
-                target_id = f"postmessage_{pid}"
-                content_td = soup.find('td', id=target_id)
+                if pid:
+                    target_id = f"postmessage_{pid}"
+                    content_td = soup.find('td', id=target_id)
+                else:
+                    content_td = soup.find('td', id=re.compile(r"^postmessage_\d+$"))
 
                 if not content_td:
                     raise ValueError("正文未找到")
@@ -181,8 +182,13 @@ def resolve_chapters(scraper: YamiboScraper, config) -> list:
     if not selected:
         return []
 
-    print("\n当前骨架版本提示：自动抓取目标帖子目录尚未接入，先回退到 RAW_HTML_CATALOG。")
-    return scraper.parse_catalog(config.raw_html_catalog)
+    return [
+        {
+            "title": selected["title"],
+            "url": selected["url"],
+            "content": "",
+        }
+    ]
 
 
 def run_scraper(config):
