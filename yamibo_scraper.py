@@ -141,10 +141,17 @@ def build_authenticated_session(config):
             save_config(config)
 
         session = create_session(user_agent=config.user_agent)
-        ok = login_with_password(session, config.username, config.password)
+        try:
+            ok = login_with_password(session, config.username, config.password)
+        except Exception as exc:
+            print(f"❌ 登录流程异常：{exc}")
+            print("请尝试：1) 使用 Cookie 模式；2) 在“修改配置”里更新账号密码后重试。")
+            return None
+
         if not ok:
             print("❌ 账号密码登录失败，请先在“修改配置”里更新账号信息，或改用 Cookie 模式。")
             return None
+
         print("✅ 登录成功，继续后续流程。")
         return session
 

@@ -1,6 +1,8 @@
 """命令行交互模块（MVP 骨架）。"""
 
 from getpass import getpass
+from pathlib import Path
+import re
 
 
 def get_main_action() -> str:
@@ -88,6 +90,58 @@ def print_terminal_encoding_hint() -> None:
     print("Windows PowerShell 可先执行: chcp 65001")
 
 
+def _catalog_stats(catalog_html: str) -> str:
+    links = len(re.findall(r"<a\s+href=", catalog_html, flags=re.IGNORECASE))
+    chars = len(catalog_html)
+    return f"长度 {chars} 字符，检测到约 {links} 个章节链接"
+
+
+def input_raw_html_catalog(current_value: str) -> str:
+    print("\n请选择 raw_html_catalog 的录入方式：")
+    print("1. 单行粘贴")
+    print("2. 多行粘贴（单独一行输入 END 结束）")
+    print("3. 从本地文件读取")
+    print("4. 保持不变")
+
+    while True:
+        mode = input("请输入对应数字 (1/2/3/4): ").strip()
+
+        if mode == "1":
+            value = input("请粘贴 HTML（单行）: ").strip()
+            print(f"✅ 已读取：{_catalog_stats(value)}")
+            return value or current_value
+
+        if mode == "2":
+            print("开始粘贴，多行输入，最后单独输入 END 回车结束：")
+            lines = []
+            while True:
+                line = input()
+                if line.strip() == "END":
+                    break
+                lines.append(line)
+            value = "\n".join(lines).strip()
+            if not value:
+                print("⚠️ 未输入内容，保持不变。")
+                return current_value
+            print(f"✅ 已读取：{_catalog_stats(value)}")
+            return value
+
+        if mode == "3":
+            file_path = input("请输入文件路径: ").strip()
+            try:
+                value = Path(file_path).read_text(encoding="utf-8")
+            except Exception as exc:
+                print(f"❌ 读取失败：{exc}")
+                continue
+            print(f"✅ 已读取文件：{_catalog_stats(value)}")
+            return value
+
+        if mode == "4":
+            return current_value
+
+        print("输入无效，请重新输入 1/2/3/4。")
+
+
 def edit_config_interactive(config):
     print("\n=== 当前配置 ===")
     print(f"1. user_agent: {config.user_agent}")
@@ -115,15 +169,7 @@ def edit_config_interactive(config):
         elif choice == "6":
             config.book_author = input("新的 book_author: ").strip() or config.book_author
         elif choice == "7":
-            print("请输入新的 raw_html_catalog，单独一行输入 END 结束：")
-            lines = []
-            while True:
-                line = input()
-                if line == "END":
-                    break
-                lines.append(line)
-            if lines:
-                config.raw_html_catalog = "\n".join(lines)
+            config.raw_html_catalog = input_raw_html_catalog(config.raw_html_catalog)
         elif choice == "8":
             return config
         else:
