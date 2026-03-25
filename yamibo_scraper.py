@@ -5,18 +5,26 @@ import re
 import random
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
-from curl_cffi import requests
 from bs4 import BeautifulSoup
 from ebooklib import epub
 from opencc import OpenCC
 
+from auth import create_session, prompt_account_credentials, prompt_cookie, login_with_password
+from search import search_threads_by_keyword
+from config_store import load_config, save_config
+from cli import (
+    get_main_action,
+    get_save_choice,
+    get_catalog_mode,
+    get_search_keyword,
+    choose_thread,
+    get_auth_mode,
+    print_terminal_encoding_hint,
+    edit_config_interactive,
+)
+
 # ================= 1. 全局配置区 =================
 
-YOUR_COOKIE_STRING = "Your Cookie"
-YOUR_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36" 
-
-BOOK_TITLE = "TITLE"
-BOOK_AUTHOR = "AUTHOR"
 OUTPUT_DIR = Path("./output")
 
 CRAWL_DELAY = 3
@@ -25,26 +33,18 @@ ENABLE_SIMPLIFIED = True
 
 cc = OpenCC('t2s')  # 繁体转简体
 
-# ================= 2. 目录 =================
-
-RAW_HTML_CATALOG = """ HTML """
-
 # ================= 3. 核心类 =================
 
+
 class YamiboScraper:
-    def __init__(self, cookie: str, user_agent: str):
-        self.session = requests.Session(impersonate="chrome110")
-        self.session.headers.update({
-            'User-Agent': user_agent,
-            'Cookie': cookie,
-            'Referer': 'https://bbs.yamibo.com/forum.php'
-        })
+    def __init__(self, session):
+        self.session = session
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     def parse_catalog(self, html_text: str) -> list:
         chapters = []
         pattern = re.compile(r'<a href="(https://bbs\.yamibo\.com/[^"]+)"[^>]*>(.*?)</a>')
-        
+
         for url, title in pattern.findall(html_text):
             title = re.sub('<.*?>', '', title).strip()  # 去掉 <strong>
             chapters.append({
@@ -84,13 +84,14 @@ class YamiboScraper:
                 return text
 
             except Exception as e:
-                print(f"    ⚠️ 第{attempt+1}次失败: {e}")
-                
+                print(f"    ⚠️ 第{attempt + 1}次失败: {e}")
+
                 if attempt == MAX_RETRIES - 1:
                     return f"【最终失败：{e}】"
-                
+
                 sleep_time = 2 ** attempt
                 time.sleep(sleep_time)
+
 
 # ================= 4. 文件输出 =================
 
@@ -99,6 +100,7 @@ def save_to_txt(chapters, filename):
         for c in chapters:
             f.write(f"==== {c['title']} ====\n\n{c['content']}\n\n\n")
     print(f"📄 TXT 文件已保存至: {filename}")
+
 
 def save_to_epub(chapters, filename, title, author):
     book = epub.EpubBook()
@@ -109,7 +111,7 @@ def save_to_epub(chapters, filename, title, author):
 
     for i, c in enumerate(chapters):
         chapter = epub.EpubHtml(title=c['title'], file_name=f'chap_{i}.xhtml')
-        
+
         html = f"<h1>{c['title']}</h1>"
         for line in c['content'].split('\n'):
             if line.strip():
@@ -119,46 +121,76 @@ def save_to_epub(chapters, filename, title, author):
         book.add_item(chapter)
         epub_chapters.append(chapter)
 
-    # 1. 设置内部的 TOC（目录）结构
     book.toc = tuple(epub_chapters)
-    
-    # 2. ⚠️ 关键修复：显式添加 NCX 和 Nav 导航项，阅读器才能解析出目录侧边栏
     book.add_item(epub.EpubNcx())
     book.add_item(epub.EpubNav())
-
-    # 3. 设置阅读顺序 (spine)，'nav' 表示把目录放在最前面
     book.spine = ['nav'] + epub_chapters
 
-    # 生成 EPUB 文件
-    epub.write_epub(filename, book, {} )
+    epub.write_epub(filename, book, {})
     print(f"📚 EPUB 文件已保存至: {filename}")
+
 
 # ================= 5. 主程序 =================
 
-def get_save_choice():
-    print("="*30)
-    print("请选择要保存的文件格式：")
-    print("1. 只保存 TXT 格式")
-    print("2. 只保存 EPUB 格式")
-    print("3. 同时保存 TXT 和 EPUB")
-    print("="*30)
-    
-    while True:
-        choice = input("请输入对应数字 (1/2/3): ").strip()
-        if choice in ['1', '2', '3']:
-            return choice
-        print("输入无效，请重新输入 1、2 或 3。")
+def build_authenticated_session(config):
+    auth_mode = get_auth_mode()
 
-def main():
-    # 程序一开始先询问保存格式
+    if auth_mode == "1":
+        if not config.username:
+            config.username, config.password = prompt_account_credentials()
+            save_config(config)
+
+        session = create_session(user_agent=config.user_agent)
+        ok = login_with_password(session, config.username, config.password)
+        if not ok:
+            print("❌ 账号密码登录失败，请先在“修改配置”里更新账号信息，或改用 Cookie 模式。")
+            return None
+        print("✅ 登录成功，继续后续流程。")
+        return session
+
+    if not config.cookie:
+        config.cookie = prompt_cookie()
+        save_config(config)
+
+    if not config.cookie:
+        print("❌ Cookie 不能为空。")
+        return None
+
+    session = create_session(user_agent=config.user_agent, cookie=config.cookie)
+    print("✅ 已加载 Cookie，继续后续流程。")
+    return session
+
+
+def resolve_chapters(scraper: YamiboScraper, config) -> list:
+    mode = get_catalog_mode()
+
+    if mode == "1":
+        return scraper.parse_catalog(config.raw_html_catalog)
+
+    keyword = get_search_keyword()
+    results = search_threads_by_keyword(scraper.session, keyword)
+    selected = choose_thread(results)
+
+    if not selected:
+        return []
+
+    print("\n当前骨架版本提示：自动抓取目标帖子目录尚未接入，先回退到 RAW_HTML_CATALOG。")
+    return scraper.parse_catalog(config.raw_html_catalog)
+
+
+def run_scraper(config):
     save_choice = get_save_choice()
+    session = build_authenticated_session(config)
+    if not session:
+        return
+
     print("\n配置完成，开始抓取目录...")
 
-    scraper = YamiboScraper(YOUR_COOKIE_STRING, YOUR_USER_AGENT)
-    chapters = scraper.parse_catalog(RAW_HTML_CATALOG)
+    scraper = YamiboScraper(session)
+    chapters = resolve_chapters(scraper, config)
 
     if not chapters:
-        print("未解析到任何章节，请检查 RAW_HTML_CATALOG 内容。")
+        print("未解析到任何章节，请检查 raw_html_catalog 内容，或检查搜索结果。")
         return
 
     failed = []
@@ -171,22 +203,20 @@ def main():
 
         ch['content'] = content
 
-        # 生成 20 字预览用于控制台显示，去除所有空白字符以保证连贯
         clean_text = re.sub(r'\s+', '', content)
         preview = clean_text[:20] + "..." if len(clean_text) > 20 else clean_text
 
-        print(f"[{i+1}/{len(chapters)}] {ch['title']} | 预览: {preview}")
+        print(f"[{i + 1}/{len(chapters)}] {ch['title']} | 预览: {preview}")
 
         time.sleep(CRAWL_DELAY + random.uniform(0, 2))
 
     print("\n抓取结束，开始生成文件...")
 
-    # 根据用户的输入执行对应的保存操作
     if save_choice in ['1', '3']:
-        save_to_txt(chapters, OUTPUT_DIR / f"{BOOK_TITLE}.txt")
-    
+        save_to_txt(chapters, OUTPUT_DIR / f"{config.book_title}.txt")
+
     if save_choice in ['2', '3']:
-        save_to_epub(chapters, OUTPUT_DIR / f"{BOOK_TITLE}.epub", BOOK_TITLE, BOOK_AUTHOR)
+        save_to_epub(chapters, OUTPUT_DIR / f"{config.book_title}.epub", config.book_title, config.book_author)
 
     if failed:
         print(f"\n⚠️ 有 {len(failed)} 个章节抓取失败:")
@@ -194,6 +224,25 @@ def main():
             print(f" - {f}")
     else:
         print("\n🎉 全部操作完美完成！")
+
+
+def main():
+    print_terminal_encoding_hint()
+    config = load_config()
+
+    while True:
+        action = get_main_action()
+
+        if action == "1":
+            run_scraper(config)
+        elif action == "2":
+            config = edit_config_interactive(config)
+            save_config(config)
+            print("✅ 配置已保存到 yamibo_config.json")
+        else:
+            print("已退出。")
+            return
+
 
 if __name__ == "__main__":
     main()
