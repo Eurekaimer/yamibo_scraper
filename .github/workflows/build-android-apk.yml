@@ -1,5 +1,8 @@
 ﻿name: Build Android APK
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 on:
   workflow_dispatch:
   push:
@@ -41,6 +44,18 @@ jobs:
           echo "== Release APK files =="
           ls -lah android_app/app/build/outputs/apk/release || true
 
+      - name: Resolve release APK path
+        id: release_apk
+        run: |
+          RELEASE_APK=$(find android_app/app/build/outputs/apk/release -type f -name "*.apk" ! -name "*unsigned*.apk" | head -n 1)
+          if [ -z "$RELEASE_APK" ]; then
+            echo "No installable release APK found."
+            ls -lah android_app/app/build/outputs/apk/release || true
+            exit 1
+          fi
+          echo "release_apk=$RELEASE_APK" >> "$GITHUB_OUTPUT"
+          echo "Resolved release APK: $RELEASE_APK"
+
       - name: Upload debug APK artifact
         uses: actions/upload-artifact@v4
         with:
@@ -51,4 +66,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: yamibo-mobile-release-apk
-          path: android_app/app/build/outputs/apk/release/*.apk
+          path: ${{ steps.release_apk.outputs.release_apk }}

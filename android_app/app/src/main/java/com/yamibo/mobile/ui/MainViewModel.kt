@@ -26,6 +26,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var username by mutableStateOf("")
     var password by mutableStateOf("")
     var cookie by mutableStateOf("")
+    var loginStatusText by mutableStateOf("未登录")
+    var loginStatusOk by mutableStateOf(false)
 
     var keyword by mutableStateOf("")
     var forumScope by mutableStateOf(ForumScope.BOTH)
@@ -51,6 +53,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var outputPath by mutableStateOf("")
     var outputSavedToDownloads by mutableStateOf(false)
     private var outputLocalFallbackPath: String? = null
+    private var latestLocalWorkingPath: String? = null
+    private var latestFailedRecordsPath: String? = null
+    var latestFailedCount by mutableStateOf(0)
+    var latestFailedTitles by mutableStateOf(emptyList<String>())
     var legacyStoragePermissionGranted by mutableStateOf(false)
 
     var logs by mutableStateOf(emptyList<String>())
@@ -90,6 +96,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun resetSession() {
         client = null
         authenticated = false
+        loginStatusText = "未登录"
+        loginStatusOk = false
         appendLog("会话已重置")
     }
 
@@ -117,6 +125,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 throw IllegalStateException("账号密码登录失败")
             }
             authenticated = true
+            loginStatusText = "账号登录成功"
+            loginStatusOk = true
             appendLog("账号登录成功")
             return c
         }
@@ -131,6 +141,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         c.importCookieString(rawCookie)
         authenticated = true
+        loginStatusText = "Cookie 已载入"
+        loginStatusOk = true
         appendLog("Cookie 已载入")
         return c
     }
@@ -144,8 +156,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             isBusy = true
             try {
                 ensureAuthenticated(authRequired = true, forceReset = true)
+                if (loginStatusText == "未登录") {
+                    loginStatusText = "登录完成"
+                    loginStatusOk = true
+                }
                 appendLog("登录完成")
             } catch (e: Exception) {
+                loginStatusText = "登录失败: ${e.message}"
+                loginStatusOk = false
                 appendLog("登录失败: ${e.message}")
             } finally {
                 isBusy = false
@@ -302,6 +320,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             outputPath = ""
             outputSavedToDownloads = false
             outputLocalFallbackPath = null
+            latestLocalWorkingPath = null
+            latestFailedRecordsPath = null
+            latestFailedCount = 0
+            latestFailedTitles = emptyList()
             lastProgressUpdateMs = 0L
             lastNoticeUpdateMs = 0L
             lastNoticeText = ""
@@ -354,16 +376,79 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 outputPath = result.displayPath
                 outputSavedToDownloads = result.savedToDownloads
                 outputLocalFallbackPath = result.localFallbackPath
+                latestLocalWorkingPath = result.localWorkingPath
+                latestFailedRecordsPath = result.failedRecordsPath
+                latestFailedCount = result.failedCount
+                latestFailedTitles = result.failedTitles
                 if (result.savedToDownloads) {
                     appendLog("抓取完成，已保存到 Download: ${result.displayPath}")
                 } else {
                     appendLog("抓取完成，未能写入 Download，已回退保存到: ${result.displayPath}")
                 }
                 if (result.failedCount > 0) {
-                    appendLog("有 ${result.failedCount} 章抓取失败，请稍后重试")
+                    appendLog("有 ${result.failedCount} 章抓取失败，失败清单如下:")
+                    result.failedTitles.forEachIndexed { idx, title ->
+                        appendLog("失败[${idx + 1}]: $title")
+                    }
+                    result.failedRecordsPath?.let { path ->
+                        appendLog("失败记录已保存: $path")
+                    }
                 }
             } catch (e: Exception) {
                 appendLog("抓取失败: ${e.message}")
+            } finally {
+                isBusy = false
+            }
+        }
+    }
+
+    fun retryFailedAndPatch() {
+        if (isBusy) {
+            return
+        }
+        val localPath = latestLocalWorkingPath
+        val failedPath = latestFailedRecordsPath
+        if (localPath.isNullOrBlank() || failedPath.isNullOrBlank()) {
+            appendLog("当前没有可回填的失败章节记录")
+            return
+        }
+
+        viewModelScope.launch {
+            isBusy = true
+            try {
+                val c = ensureAuthenticated(authRequired = true)
+                appendLog("开始仅重试失败章节并回填...")
+                val result = withContext(Dispatchers.IO) {
+                    c.retryFailedAndPatch(
+                        localWorkingPath = localPath,
+                        failedRecordsPath = failedPath,
+                        speedMode = speedMode
+                    ) { msg ->
+                        viewModelScope.launch(Dispatchers.Main) {
+                            appendLog(msg)
+                        }
+                    }
+                }
+                latestLocalWorkingPath = result.localWorkingPath
+                latestFailedRecordsPath = result.failedRecordsPath
+                latestFailedCount = result.remaining
+                latestFailedTitles = result.remainingTitles
+                outputPath = result.localWorkingPath
+                outputSavedToDownloads = false
+                outputLocalFallbackPath = result.localWorkingPath
+
+                appendLog("失败回填完成：成功 ${result.succeeded}/${result.total}，剩余 ${result.remaining}")
+                if (result.remaining == 0) {
+                    appendLog("所有失败章节已回填，可重新导出到 Download。")
+                } else {
+                    appendLog("剩余失败清单:")
+                    result.remainingTitles.forEachIndexed { idx, title ->
+                        appendLog("剩余[${idx + 1}]: $title")
+                    }
+                    appendLog("仍有失败章节，稍后可再次重试。")
+                }
+            } catch (e: Exception) {
+                appendLog("失败章节回填失败: ${e.message}")
             } finally {
                 isBusy = false
             }

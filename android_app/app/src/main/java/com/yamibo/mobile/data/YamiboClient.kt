@@ -5,13 +5,20 @@ import android.content.Context
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import okhttp3.FormBody
 import okhttp3.JavaNetCookieJar
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 import java.net.CookieManager
@@ -20,12 +27,16 @@ import java.net.HttpCookie
 import java.net.URI
 import java.net.URLEncoder
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.roundToLong
 import kotlin.random.Random
 
 private const val RETRY_JITTER_MS_MAX = 800L
 private const val MIN_CATALOG_CHAPTERS = 3
+private const val FAILED_MARKER_PREFIX = "#FAILED_CHAPTER_"
 private const val DEFAULT_USER_AGENT =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 
@@ -52,6 +63,11 @@ private data class RetryPolicy(
     val initialDelayMs: Long,
     val maxDelayMs: Long,
     val backoffMultiplier: Double
+)
+
+private data class PageFetchResult(
+    val html: String,
+    val finalUrl: String
 )
 
 class YamiboClient(
@@ -300,12 +316,17 @@ class YamiboClient(
         snippetLength: Int = 120
     ): Pair<List<PreviewItem>, Map<Int, String>> {
         val retryPolicy = retryPolicyForSpeed(SpeedMode.FAST)
+        val pidContentCache = mutableMapOf<String, String>()
         val count = previewCount.coerceAtLeast(1).coerceAtMost(chapters.size)
         val previewItems = mutableListOf<PreviewItem>()
         val cache = mutableMapOf<Int, String>()
 
         for (i in 0 until count) {
-            val content = fetchChapterContent(chapters[i].url, retryPolicy)
+            val content = fetchChapterContent(
+                url = chapters[i].url,
+                retryPolicy = retryPolicy,
+                pidContentCache = pidContentCache
+            )
             cache[i] = content
             val snippet = content
                 .replace(Regex("\\s+"), " ")
@@ -333,43 +354,94 @@ class YamiboClient(
         val safeName = sanitizeFilename(outputTitle.ifBlank { "TITLE" })
         val fileName = "$safeName.txt"
         val retryPolicy = retryPolicyForSpeed(speedMode)
-
-        val failedTitles = mutableListOf<String>()
+        val pidContentCache = ConcurrentHashMap<String, String>()
+        val failedTitlesQueue = ConcurrentLinkedQueue<String>()
+        val failedRecordQueue = ConcurrentLinkedQueue<FailedChapterRecord>()
         val startedAt = System.currentTimeMillis()
+        val cacheHitCount = AtomicInteger(0)
+        val doneCounter = AtomicInteger(0)
+        if (speedMode.maxConcurrency > 1) {
+            onNotice?.invoke("已启用并发抓取，最大并发 ${speedMode.maxConcurrency}。")
+        }
 
-        chapters.forEachIndexed { index, chapter ->
-            val content = previewCache[index] ?: fetchChapterContent(
-                chapter.url,
-                retryPolicy
-            ) { nextAttempt, maxAttempts, waitMs, reason ->
-                onNotice?.invoke(
-                    "《${chapter.title}》请求失败，准备重试 $nextAttempt/$maxAttempts，等待 ${"%.1f".format(waitMs / 1000.0)}s：$reason"
-                )
-            }
-            if (content.startsWith("【最终失败")) {
-                failedTitles += chapter.title
-            }
-            chapter.content = content
+        coroutineScope {
+            val semaphore = Semaphore(speedMode.maxConcurrency)
+            val jobs = chapters.mapIndexed { index, chapter ->
+                async {
+                    semaphore.withPermit {
+                        val pid = chapter.pid
+                        var usedNetwork = false
 
-            val done = index + 1
-            val elapsedSeconds = (System.currentTimeMillis() - startedAt) / 1000.0
-            val eta = if (done <= 0) 0L else {
-                ((elapsedSeconds / done) * (chapters.size - done)).roundToLong().coerceAtLeast(0)
-            }
+                        val previewContent = previewCache[index]
+                        val content = if (previewContent != null) {
+                            if (pid.isNotBlank()) {
+                                pidContentCache[pid] = previewContent
+                            }
+                            previewContent
+                        } else if (pid.isNotBlank() && pidContentCache.containsKey(pid)) {
+                            cacheHitCount.incrementAndGet()
+                            pidContentCache[pid].orEmpty()
+                        } else {
+                            usedNetwork = true
+                            fetchChapterContent(
+                                url = chapter.url,
+                                retryPolicy = retryPolicy,
+                                pidContentCache = pidContentCache
+                            ) { nextAttempt, maxAttempts, waitMs, reason ->
+                                onNotice?.invoke(
+                                    "《${chapter.title}》请求失败，准备重试 $nextAttempt/$maxAttempts，等待 ${"%.1f".format(waitMs / 1000.0)}s：$reason"
+                                )
+                            }
+                        }
 
-            onProgress(
-                CrawlProgress(
-                    done = done,
-                    total = chapters.size,
-                    currentTitle = chapter.title,
-                    etaSeconds = eta
-                )
-            )
+                        val finalContent = if (content.startsWith("【最终失败")) {
+                            val marker = "$FAILED_MARKER_PREFIX${index + 1}#"
+                            failedTitlesQueue.add(chapter.title)
+                            failedRecordQueue.add(
+                                FailedChapterRecord(
+                                    index = index,
+                                    title = chapter.title,
+                                    url = chapter.url,
+                                    marker = marker
+                                )
+                            )
+                            marker
+                        } else {
+                            content
+                        }
+                        chapter.content = finalContent
 
-            if (done < chapters.size) {
-                val sleepMs = Random.nextLong(speedMode.delayMinMs, speedMode.delayMaxMs + 1)
-                delay(sleepMs)
+                        val done = doneCounter.incrementAndGet()
+                        val elapsedSeconds = (System.currentTimeMillis() - startedAt) / 1000.0
+                        val eta = if (done <= 0) 0L else {
+                            ((elapsedSeconds / done) * (chapters.size - done)).roundToLong().coerceAtLeast(0)
+                        }
+
+                        onProgress(
+                            CrawlProgress(
+                                done = done,
+                                total = chapters.size,
+                                currentTitle = chapter.title,
+                                etaSeconds = eta
+                            )
+                        )
+
+                        if (done < chapters.size) {
+                            val sleepMs = if (usedNetwork) {
+                                Random.nextLong(speedMode.delayMinMs, speedMode.delayMaxMs + 1)
+                            } else {
+                                Random.nextLong(30L, 90L)
+                            }
+                            delay(sleepMs)
+                        }
+                    }
+                }
             }
+            jobs.awaitAll()
+        }
+
+        if (cacheHitCount.get() > 0) {
+            onNotice?.invoke("目录页缓存命中 ${cacheHitCount.get()} 章，已减少重复请求。")
         }
 
         val text = buildString {
@@ -379,6 +451,19 @@ class YamiboClient(
                 append("\n\n\n")
             }
         }
+        val localWorking = saveToAppPrivateOutput(fileName, text)
+
+        val failedRecordsPath = if (failedRecordQueue.isNotEmpty()) {
+            val failedFileName = "${safeName}.failed_chapters.json"
+            val failedFile = saveFailedRecordsToAppPrivate(
+                fileName = failedFileName,
+                records = failedRecordQueue.toList().sortedBy { it.index }
+            )
+            failedFile.absolutePath
+        } else {
+            null
+        }
+
         val saveTarget = writeTextToPreferredLocation(
             fileName = fileName,
             text = text,
@@ -390,10 +475,90 @@ class YamiboClient(
             displayPath = saveTarget.displayPath,
             fileName = fileName,
             savedToDownloads = saveTarget.savedToDownloads,
+            localWorkingPath = localWorking.absolutePath,
+            failedRecordsPath = failedRecordsPath,
             localFallbackPath = saveTarget.localFallbackPath,
             chapterCount = chapters.size,
-            failedCount = failedTitles.size,
-            failedTitles = failedTitles
+            failedCount = failedTitlesQueue.size,
+            failedTitles = failedTitlesQueue.toList()
+        )
+    }
+
+    suspend fun retryFailedAndPatch(
+        localWorkingPath: String,
+        failedRecordsPath: String,
+        speedMode: SpeedMode,
+        onNotice: ((String) -> Unit)? = null
+    ): RetryFillResult {
+        val txtFile = File(localWorkingPath)
+        if (!txtFile.exists()) {
+            throw IllegalStateException("本地工作TXT不存在: $localWorkingPath")
+        }
+        val recordFile = File(failedRecordsPath)
+        if (!recordFile.exists()) {
+            throw IllegalStateException("失败章节记录不存在: $failedRecordsPath")
+        }
+
+        val records = loadFailedRecords(recordFile).sortedBy { it.index }
+        if (records.isEmpty()) {
+            return RetryFillResult(
+                total = 0,
+                succeeded = 0,
+                remaining = 0,
+                localWorkingPath = txtFile.absolutePath,
+                failedRecordsPath = null,
+                remainingTitles = emptyList()
+            )
+        }
+
+        var txtContent = txtFile.readText(Charsets.UTF_8)
+        val retryPolicy = retryPolicyForSpeed(speedMode)
+        val pidCache = ConcurrentHashMap<String, String>()
+        val remaining = mutableListOf<FailedChapterRecord>()
+        var successCount = 0
+
+        records.forEachIndexed { idx, record ->
+            onNotice?.invoke("重试失败章节 ${idx + 1}/${records.size}: ${record.title}")
+            val content = fetchChapterContent(
+                url = record.url,
+                retryPolicy = retryPolicy,
+                pidContentCache = pidCache
+            ) { nextAttempt, maxAttempts, waitMs, reason ->
+                onNotice?.invoke(
+                    "《${record.title}》回填重试 $nextAttempt/$maxAttempts，等待 ${"%.1f".format(waitMs / 1000.0)}s：$reason"
+                )
+            }
+            if (content.startsWith("【最终失败")) {
+                remaining += record
+                return@forEachIndexed
+            }
+
+            if (!txtContent.contains(record.marker)) {
+                // Marker may already be replaced by user/manual edits; skip silently.
+                successCount += 1
+                return@forEachIndexed
+            }
+            txtContent = txtContent.replace(record.marker, content)
+            successCount += 1
+        }
+
+        txtFile.writeText(txtContent, Charsets.UTF_8)
+
+        val remainingPath = if (remaining.isNotEmpty()) {
+            val saved = saveFailedRecordsToAppPrivate(recordFile.name, remaining)
+            saved.absolutePath
+        } else {
+            runCatching { recordFile.delete() }
+            null
+        }
+
+        return RetryFillResult(
+            total = records.size,
+            succeeded = successCount,
+            remaining = remaining.size,
+            localWorkingPath = txtFile.absolutePath,
+            failedRecordsPath = remainingPath,
+            remainingTitles = remaining.map { it.title }
         )
     }
 
@@ -485,10 +650,7 @@ class YamiboClient(
     }
 
     private fun saveToAppPrivateOutput(fileName: String, text: String): SaveTarget {
-        val outputDir = File(context.getExternalFilesDir(null), "output")
-        if (!outputDir.exists()) {
-            outputDir.mkdirs()
-        }
+        val outputDir = appOutputDir()
         val output = File(outputDir, fileName)
         output.writeText(text, Charsets.UTF_8)
         return SaveTarget(
@@ -499,8 +661,59 @@ class YamiboClient(
         )
     }
 
+    private fun appOutputDir(): File {
+        val outputDir = File(context.getExternalFilesDir(null), "output")
+        if (!outputDir.exists()) {
+            outputDir.mkdirs()
+        }
+        return outputDir
+    }
+
+    private fun saveFailedRecordsToAppPrivate(
+        fileName: String,
+        records: List<FailedChapterRecord>
+    ): File {
+        val file = File(appOutputDir(), fileName)
+        val array = JSONArray()
+        records.forEach { item ->
+            val obj = JSONObject()
+            obj.put("index", item.index)
+            obj.put("title", item.title)
+            obj.put("url", item.url)
+            obj.put("marker", item.marker)
+            array.put(obj)
+        }
+        file.writeText(array.toString(2), Charsets.UTF_8)
+        return file
+    }
+
+    private fun loadFailedRecords(file: File): List<FailedChapterRecord> {
+        val raw = file.readText(Charsets.UTF_8)
+        if (raw.isBlank()) {
+            return emptyList()
+        }
+        val array = JSONArray(raw)
+        val list = mutableListOf<FailedChapterRecord>()
+        for (i in 0 until array.length()) {
+            val obj = array.optJSONObject(i) ?: continue
+            list += FailedChapterRecord(
+                index = obj.optInt("index", -1).coerceAtLeast(0),
+                title = obj.optString("title", "未知章节"),
+                url = obj.optString("url", ""),
+                marker = obj.optString("marker", "")
+            )
+        }
+        return list.filter { it.url.isNotBlank() && it.marker.isNotBlank() }
+    }
+
     private fun retryPolicyForSpeed(speedMode: SpeedMode): RetryPolicy {
         return when (speedMode) {
+            SpeedMode.TURBO -> RetryPolicy(
+                maxAttempts = 2,
+                initialDelayMs = 120L,
+                maxDelayMs = 700L,
+                backoffMultiplier = 1.45
+            )
             SpeedMode.FAST -> RetryPolicy(
                 maxAttempts = 3,
                 initialDelayMs = 250L,
@@ -877,6 +1090,10 @@ class YamiboClient(
     }
 
     private fun getText(url: String, referer: String = "${BASE_URL}forum.php"): String {
+        return getPage(url, referer).html
+    }
+
+    private fun getPage(url: String, referer: String = "${BASE_URL}forum.php"): PageFetchResult {
         val req = Request.Builder()
             .url(url)
             .header("User-Agent", userAgent)
@@ -889,7 +1106,12 @@ class YamiboClient(
             if (!response.isSuccessful) {
                 throw IOException("HTTP ${response.code}")
             }
-            return response.body?.string().orEmpty()
+            val html = response.body?.string().orEmpty()
+            val finalUrl = response.request.url.toString()
+            return PageFetchResult(
+                html = html,
+                finalUrl = finalUrl
+            )
         }
     }
 
@@ -913,62 +1135,79 @@ class YamiboClient(
     private suspend fun fetchChapterContent(
         url: String,
         retryPolicy: RetryPolicy,
+        pidContentCache: MutableMap<String, String>? = null,
         onRetry: ((nextAttempt: Int, maxAttempts: Int, waitMs: Long, reason: String) -> Unit)? = null
     ): String {
         val pid = extractPid(url)
+        if (pid.isNotBlank()) {
+            val cached = pidContentCache?.get(pid)
+            if (!cached.isNullOrBlank()) {
+                return cached
+            }
+        }
+
         var waitMs = retryPolicy.initialDelayMs
 
         for (attempt in 1..retryPolicy.maxAttempts) {
             try {
-                val html = getText(url)
-                val doc = Jsoup.parse(html, BASE_URL)
+                val page = getPage(url)
+                val doc = Jsoup.parse(page.html, BASE_URL)
+                val batch = extractAllPostContents(doc)
+                if (batch.isNotEmpty() && pidContentCache != null) {
+                    batch.forEach { (k, v) ->
+                        if (v.isNotBlank()) {
+                            pidContentCache[k] = v
+                        }
+                    }
+                }
 
-                var contentNode: Element? = null
                 if (pid.isNotBlank()) {
-                    contentNode = doc.selectFirst("#postmessage_$pid")
+                    val cached = pidContentCache?.get(pid)
+                    if (!cached.isNullOrBlank()) {
+                        return cached
+                    }
                 }
-                if (contentNode == null) {
-                    contentNode = doc.selectFirst("td[id~=^postmessage_\\d+$]")
+
+                val guardReason = detectRiskOrGuardPage(doc)
+                if (!guardReason.isNullOrBlank()) {
+                    throw IOException(guardReason)
                 }
+
+                if (pid.isNotBlank()) {
+                    throw IllegalStateException("未找到目标章节 PID=$pid")
+                }
+
+                var contentNode: Element? = doc.selectFirst("td[id~=^postmessage_\\d+$]")
                 if (contentNode == null) {
                     contentNode = doc.selectFirst("div[id~=^postmessage_\\d+$]")
                 }
                 if (contentNode == null) {
                     contentNode = doc.selectFirst("div.pcb, td.t_f, div.t_f")
                 }
-
                 if (contentNode == null) {
                     throw IllegalStateException("正文未找到")
                 }
 
-                contentNode.select("i.pstatus, script, style").remove()
-
-                var text = contentNode.wholeText()
-                    .replace("\r\n", "\n")
-                    .replace(Regex("\n{3,}"), "\n\n")
-                    .trim()
-
-                if (text.replace(Regex("\\s+"), "").length < 20) {
-                    text = contentNode.text().replace(Regex("\\s{2,}"), " ").trim()
-                }
-
-                if (text.replace(Regex("\\s+"), "").length < 20) {
-                    throw IllegalStateException("正文内容过短，疑似未命中正文区域")
-                }
-
-                return text
+                return textFromContentNode(contentNode)
             } catch (e: Exception) {
+                val reason = (e.message ?: "unknown").trim()
+                if (isNonRetriable(reason)) {
+                    return "【最终失败：$reason】"
+                }
                 if (attempt >= retryPolicy.maxAttempts) {
-                    return "【最终失败：${e.message ?: "unknown"}】"
+                    return "【最终失败：$reason】"
                 }
 
                 val jitter = Random.nextLong(0, RETRY_JITTER_MS_MAX + 1)
-                val finalWaitMs = waitMs + jitter
+                var finalWaitMs = waitMs + jitter
+                if (isLikelyGuardReason(reason)) {
+                    finalWaitMs = maxOf(finalWaitMs, 2800L)
+                }
                 onRetry?.invoke(
                     attempt + 1,
                     retryPolicy.maxAttempts,
                     finalWaitMs,
-                    e.message ?: "unknown"
+                    reason
                 )
                 delay(finalWaitMs)
                 waitMs = (waitMs * retryPolicy.backoffMultiplier).toLong().coerceAtMost(retryPolicy.maxDelayMs)
@@ -976,5 +1215,79 @@ class YamiboClient(
         }
 
         return "【最终失败：未知错误】"
+    }
+
+    private fun textFromContentNode(node: Element): String {
+        val cloned = node.clone()
+        cloned.select("i.pstatus, script, style").remove()
+
+        var text = cloned.wholeText()
+            .replace("\r\n", "\n")
+            .replace(Regex("\n{3,}"), "\n\n")
+            .trim()
+        if (text.replace(Regex("\\s+"), "").length < 20) {
+            text = cloned.text().replace(Regex("\\s{2,}"), " ").trim()
+        }
+        if (text.replace(Regex("\\s+"), "").length < 20) {
+            throw IllegalStateException("正文内容过短，疑似未命中正文区域")
+        }
+        return text
+    }
+
+    private fun extractAllPostContents(doc: org.jsoup.nodes.Document): Map<String, String> {
+        val result = linkedMapOf<String, String>()
+        val nodes = doc.select("td[id~=^postmessage_\\d+$], div[id~=^postmessage_\\d+$]")
+        for (node in nodes) {
+            val id = node.id()
+            val pid = Regex("^postmessage_(\\d+)$").find(id)?.groupValues?.getOrNull(1) ?: continue
+            runCatching { textFromContentNode(node) }
+                .getOrNull()
+                ?.takeIf { it.isNotBlank() }
+                ?.let { result[pid] = it }
+        }
+        return result
+    }
+
+    private fun detectRiskOrGuardPage(doc: org.jsoup.nodes.Document): String? {
+        val text = doc.text()
+        if (text.isBlank()) {
+            return null
+        }
+        val keywords = listOf(
+            "验证码",
+            "安全验证",
+            "访问过于频繁",
+            "请稍后再试",
+            "请求过于频繁",
+            "需要登录后查看",
+            "您无权进行当前操作",
+            "Cloudflare",
+            "Attention Required"
+        )
+        return if (keywords.any { text.contains(it, ignoreCase = true) }) {
+            "疑似触发风控/权限限制页面"
+        } else {
+            null
+        }
+    }
+
+    private fun isNonRetriable(reason: String): Boolean {
+        val r = reason.lowercase(Locale.ROOT)
+        return r.contains("http 400")
+            || r.contains("http 401")
+            || r.contains("http 403")
+            || r.contains("http 404")
+            || r.contains("http 410")
+            || r.contains("http 422")
+            || r.contains("未找到目标章节 pid")
+    }
+
+    private fun isLikelyGuardReason(reason: String): Boolean {
+        val r = reason.lowercase(Locale.ROOT)
+        return r.contains("验证码")
+            || r.contains("风控")
+            || r.contains("过于频繁")
+            || r.contains("cloudflare")
+            || r.contains("attention required")
     }
 }

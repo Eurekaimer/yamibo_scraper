@@ -6,6 +6,8 @@ import re
 import time
 import random
 import sys
+import os
+import subprocess
 from pathlib import Path
 import tkinter as tk
 import tkinter.font as tkfont
@@ -24,6 +26,7 @@ from yamibo_scraper import (
     save_to_txt,
     save_to_epub,
     dump_failed_chapters,
+    retry_failed_chapters,
     FAILED_MARKER_PREFIX,
     _sanitize_filename,
     _extract_suggested_meta_from_thread_title,
@@ -47,12 +50,16 @@ class YamiboGUI:
         self.current_chapters: list[dict] = []
         self.current_source_thread: dict | None = None
         self.preview_cache: dict[int, str] = {}
+        self.latest_txt_path: Path | None = None
+        self.latest_epub_path: Path | None = None
+        self.latest_failed_file: Path | None = None
 
         self._build_vars()
         self._init_fonts()
         self._apply_theme()
         self._build_ui()
         self.refresh_txt_list()
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def _init_fonts(self):
         self._try_load_bundled_fonts()
@@ -133,6 +140,7 @@ class YamiboGUI:
         self.username_var = tk.StringVar(value=self.config.username)
         self.password_var = tk.StringVar(value=self.config.password)
         self.cookie_var = tk.StringVar(value=self.config.cookie)
+        self.remember_auth_var = tk.BooleanVar(value=bool(getattr(self.config, "remember_auth", True)))
         self.book_title_var = tk.StringVar(value=self.config.book_title if self.config.book_title != "TITLE" else "")
         self.book_author_var = tk.StringVar(value=self.config.book_author if self.config.book_author != "AUTHOR" else "")
         self.auth_mode_var = tk.StringVar(value="account")
@@ -204,6 +212,13 @@ class YamiboGUI:
             value="cookie",
             command=self._on_auth_mode_changed,
         ).pack(side="left")
+        ttk.Checkbutton(
+            option_row,
+            text="记住账号/密码",
+            variable=self.remember_auth_var,
+            onvalue=True,
+            offvalue=False,
+        ).pack(side="left", padx=(8, 0))
         ttk.Label(option_row, text="来源").pack(side="left", padx=(16, 0))
         ttk.Radiobutton(option_row, text="搜索", variable=self.source_mode_var, value="search").pack(side="left")
         ttk.Radiobutton(option_row, text="raw_html", variable=self.source_mode_var, value="raw").pack(side="left")
@@ -308,6 +323,8 @@ class YamiboGUI:
         run_bar = ttk.Frame(self.scrape_tab)
         run_bar.pack(fill="x", padx=10, pady=6)
         ttk.Button(run_bar, text="开始抓取", command=self.start_crawl, style="Primary.TButton").pack(side="left")
+        ttk.Button(run_bar, text="仅回填失败章节", command=self.retry_failed_for_latest, style="Ghost.TButton").pack(side="left", padx=6)
+        ttk.Button(run_bar, text="打开最新文件", command=self.open_latest_output_file, style="Ghost.TButton").pack(side="left", padx=6)
         ttk.Button(run_bar, text="清空日志", command=lambda: self.log_text.delete("1.0", "end"), style="Ghost.TButton").pack(side="left", padx=6)
 
         self.status_var = tk.StringVar(value="状态：待命（建议先输入账号密码并保存配置）")
@@ -348,18 +365,39 @@ class YamiboGUI:
         self.scraper = None
         self.log("ℹ️ 会话已重置。")
 
-    def save_config_from_ui(self):
-        self.config.user_agent = self.user_agent_var.get().strip()
-        self.config.username = self.username_var.get().strip()
-        self.config.password = self.password_var.get().strip()
-        self.config.cookie = self.cookie_var.get().strip()
+    def _apply_config_from_ui(self):
+        self.config.user_agent = self.user_agent_var.get().strip() or self.config.user_agent
         self.config.book_title = self.book_title_var.get().strip() or "TITLE"
         self.config.book_author = self.book_author_var.get().strip() or "AUTHOR"
+        self.config.remember_auth = bool(self.remember_auth_var.get())
+
         raw = self.raw_text.get("1.0", "end").strip()
         self.config.raw_html_catalog = raw if raw else " HTML "
+
+        if self.config.remember_auth:
+            self.config.username = self.username_var.get().strip()
+            self.config.password = self.password_var.get().strip()
+            self.config.cookie = self.cookie_var.get().strip()
+        else:
+            self.config.username = ""
+            self.config.password = ""
+            self.config.cookie = ""
+
+    def _auto_save_config(self):
+        self._apply_config_from_ui()
         save_config(self.config)
+
+    def save_config_from_ui(self):
+        self._auto_save_config()
         self.rebuild_session()
         messagebox.showinfo("提示", "配置已保存。")
+
+    def on_close(self):
+        try:
+            self._auto_save_config()
+        except Exception:
+            pass
+        self.root.destroy()
 
     def _build_session(self, auth_required: bool):
         mode = self.auth_mode_var.get()
@@ -394,6 +432,7 @@ class YamiboGUI:
         if self.session is None:
             self.session = self._build_session(auth_required=auth_required)
             self.scraper = YamiboScraper(self.session)
+            self._auto_save_config()
             self.log("✅ 会话已建立。")
 
     def _parse_forum_scope(self) -> list[int]:
@@ -516,8 +555,96 @@ class YamiboGUI:
         author = author or "UNKNOWN"
         return title, author
 
+    def _open_path_in_system(self, path: Path):
+        if not path or not path.exists():
+            messagebox.showwarning("提示", "目标文件不存在，无法打开。")
+            return
+        try:
+            if platform.system().lower().startswith("win"):
+                os.startfile(str(path))
+            elif platform.system().lower() == "darwin":
+                subprocess.run(["open", str(path)], check=False)
+            else:
+                subprocess.run(["xdg-open", str(path)], check=False)
+        except Exception as exc:
+            messagebox.showerror("错误", f"打开文件失败：{exc}")
+
+    def open_latest_output_file(self):
+        target = None
+        if self.latest_txt_path and self.latest_txt_path.exists():
+            target = self.latest_txt_path
+        elif self.latest_epub_path and self.latest_epub_path.exists():
+            target = self.latest_epub_path
+
+        if not target:
+            messagebox.showwarning("提示", "当前没有可打开的抓取结果文件。")
+            return
+        self._open_path_in_system(target)
+
+    def _retry_failed_and_refill(
+        self,
+        txt_path: Path,
+        failed_file: Path,
+        epub_path: Path | None,
+        title: str,
+        author: str,
+    ) -> list[dict]:
+        if not txt_path.exists():
+            raise RuntimeError("未找到 TXT 文件，无法执行失败回填。")
+        if not failed_file.exists():
+            raise RuntimeError("未找到失败记录文件，无法执行失败回填。")
+
+        self.log("🔁 开始仅重试失败章节并回填...")
+        still_failed = retry_failed_chapters(self.scraper, failed_file, txt_path)
+        if still_failed:
+            self.latest_failed_file = failed_file
+            self.log(f"⚠️ 回填后仍有 {len(still_failed)} 章失败，已保留失败记录。")
+            for item in still_failed:
+                self.log(f"   - {item.get('title', '未知章节')}")
+        else:
+            self.latest_failed_file = None
+            self.log("✅ 失败章节已全部回填完成。")
+
+        if epub_path and epub_path.exists():
+            updated_chapters = parse_chapters_from_txt(txt_path)
+            if updated_chapters:
+                save_to_epub(updated_chapters, epub_path, title, author)
+                self.log("📘 EPUB 已按回填结果重新生成。")
+            else:
+                self.log("⚠️ TXT 回填后解析失败，EPUB 未重建。")
+
+        self.refresh_txt_list()
+        return still_failed
+
+    def retry_failed_for_latest(self):
+        try:
+            self._ensure_scraper(auth_required=True)
+            failed_file = self.latest_failed_file
+            txt_path = self.latest_txt_path
+            if not failed_file or not failed_file.exists():
+                raise RuntimeError("当前没有可回填的失败章节记录。")
+            if not txt_path or not txt_path.exists():
+                raise RuntimeError("当前没有可回填的 TXT 文件。")
+
+            title, author = self._resolve_output_meta()
+            epub_path = self.latest_epub_path if (self.latest_epub_path and self.latest_epub_path.exists()) else None
+            still_failed = self._retry_failed_and_refill(
+                txt_path=txt_path,
+                failed_file=failed_file,
+                epub_path=epub_path,
+                title=title,
+                author=author,
+            )
+            if still_failed:
+                messagebox.showwarning("回填完成", f"仍有 {len(still_failed)} 章失败，已保留失败记录。")
+            else:
+                messagebox.showinfo("回填完成", "失败章节已全部回填。")
+        except Exception as exc:
+            messagebox.showerror("错误", str(exc))
+
     def start_crawl(self):
         try:
+            self._auto_save_config()
             self._ensure_scraper(auth_required=True, force_reset=True)
             chapters = self._resolve_chapters_from_ui()
             if not chapters:
@@ -527,6 +654,9 @@ class YamiboGUI:
             safe_name = _sanitize_filename(title)
             txt_path = OUTPUT_DIR / f"{safe_name}.txt"
             epub_path = OUTPUT_DIR / f"{safe_name}.epub"
+            self.latest_txt_path = txt_path if self.save_choice_var.get().strip() in {"1", "3"} else None
+            self.latest_epub_path = epub_path if self.save_choice_var.get().strip() in {"2", "3"} else None
+            self.latest_failed_file = None
 
             speed_mode = self.speed_mode_var.get().strip() or "fast"
             profile = SPEED_PROFILES.get(speed_mode, SPEED_PROFILES["fast"])
@@ -560,17 +690,57 @@ class YamiboGUI:
 
             if save_choice in {"1", "3"}:
                 save_to_txt(chapters, txt_path)
+                self.latest_txt_path = txt_path
             if save_choice in {"2", "3"}:
                 save_to_epub(chapters, epub_path, title, author)
+                self.latest_epub_path = epub_path
 
             if failed_records:
                 failed_file = OUTPUT_DIR / f"{safe_name}.failed_chapters.json"
                 dump_failed_chapters(failed_records, failed_file)
+                self.latest_failed_file = failed_file
                 self.log(f"⚠️ 完成，但有 {len(failed_records)} 章失败。")
+                for item in failed_records:
+                    self.log(f"   - {item['title']}")
+
+                # 只导出 EPUB 时，也额外保留 TXT 以便失败回填。
+                if save_choice == "2" and (not txt_path.exists()):
+                    save_to_txt(chapters, txt_path)
+                    self.latest_txt_path = txt_path
+                    self.log("📝 已额外生成 TXT，用于失败章节回填。")
+
+                if self.latest_txt_path and messagebox.askyesno(
+                    "失败章节回填",
+                    f"检测到 {len(failed_records)} 章失败，是否立即仅重试失败章节并回填？",
+                ):
+                    still_failed = self._retry_failed_and_refill(
+                        txt_path=self.latest_txt_path,
+                        failed_file=failed_file,
+                        epub_path=self.latest_epub_path if save_choice in {"2", "3"} else None,
+                        title=title,
+                        author=author,
+                    )
+                    if still_failed:
+                        self.log(f"⚠️ 回填后仍有 {len(still_failed)} 章失败。")
+                    else:
+                        self.log("✅ 失败章节已全部回填。")
             else:
                 self.log("✅ 文件生成完成，全部章节抓取成功。")
 
-            messagebox.showinfo("完成", "抓取任务已完成。")
+            self.refresh_txt_list()
+            preferred = None
+            if self.latest_txt_path and self.latest_txt_path.exists():
+                preferred = self.latest_txt_path
+            elif self.latest_epub_path and self.latest_epub_path.exists():
+                preferred = self.latest_epub_path
+
+            if preferred and messagebox.askyesno(
+                "抓取完成",
+                f"任务已完成，是否立即打开文件？\n{preferred.name}",
+            ):
+                self._open_path_in_system(preferred)
+            else:
+                messagebox.showinfo("完成", "抓取任务已完成。")
         except Exception as exc:
             messagebox.showerror("错误", str(exc))
 

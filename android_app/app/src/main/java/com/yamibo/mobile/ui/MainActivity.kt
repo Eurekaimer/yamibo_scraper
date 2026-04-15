@@ -140,6 +140,7 @@ private fun YamiboMobileApp(vm: MainViewModel = viewModel()) {
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     SessionCard(vm)
+                    LogCard(vm)
                     SearchCard(vm)
                     CatalogCard(vm)
                     CrawlCard(
@@ -149,7 +150,6 @@ private fun YamiboMobileApp(vm: MainViewModel = viewModel()) {
                             permissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
                         }
                     )
-                    LogCard(vm)
                 }
             }
         }
@@ -190,6 +190,11 @@ private fun SessionCard(vm: MainViewModel) {
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
+            Text(
+                text = vm.loginStatusText,
+                fontSize = 12.sp,
+                color = if (vm.loginStatusOk) Color(0xFF166534) else MaterialTheme.colorScheme.primary
+            )
         } else {
             OutlinedTextField(
                 value = vm.cookie,
@@ -197,7 +202,18 @@ private fun SessionCard(vm: MainViewModel) {
                 label = { Text("Cookie") },
                 modifier = Modifier.fillMaxWidth()
             )
+            Text(
+                text = vm.loginStatusText,
+                fontSize = 12.sp,
+                color = if (vm.loginStatusOk) Color(0xFF166534) else MaterialTheme.colorScheme.primary
+            )
         }
+
+        Text(
+            text = "建议: 网络波动或频繁超时时，优先使用稳定代理再抓取，成功率和速度都会明显更好。",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
+        )
 
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
@@ -359,7 +375,7 @@ private fun CrawlCard(
         )
 
         Text(
-            "说明: 快速约 1 秒/章，仍带微弱随机抖动；为减少服务器压力请优先预览后再全量抓取。",
+            "说明: 极速/快速会启用低并发加速并保留随机抖动；若频繁重试建议降到平衡模式。",
             fontSize = 12.sp,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
         )
@@ -398,6 +414,13 @@ private fun CrawlCard(
         ) {
             Text("一键导出到 Download")
         }
+        OutlinedButton(
+            onClick = vm::retryFailedAndPatch,
+            enabled = !vm.isBusy,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("仅重试失败章节并回填")
+        }
 
         if (vm.progressText.isNotBlank()) {
             Text(vm.progressText, color = MaterialTheme.colorScheme.primary)
@@ -405,6 +428,22 @@ private fun CrawlCard(
         if (vm.outputPath.isNotBlank()) {
             val tag = if (vm.outputSavedToDownloads) "Download" else "应用目录"
             Text("保存位置($tag): ${vm.outputPath}", fontSize = 12.sp)
+        }
+        if (vm.latestFailedCount > 0) {
+            Text(
+                "当前剩余失败章节: ${vm.latestFailedCount}（可点击“仅重试失败章节并回填”）",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.primary
+            )
+            if (vm.latestFailedTitles.isNotEmpty()) {
+                SelectableListBox(
+                    height = 120.dp,
+                    itemCount = vm.latestFailedTitles.size,
+                    selectedIndex = -1,
+                    onSelect = {},
+                    itemText = { idx -> "失败[${idx + 1}] ${vm.latestFailedTitles[idx]}" }
+                )
+            }
         }
         Text(
             "提示: 若回退到应用目录，路径通常是 Android/data/com.yamibo.mobile/files/output。",

@@ -867,7 +867,7 @@ def run_scraper(config):
         save_to_epub(chapters, epub_path, config.book_title, config.book_author)
 
     if failed_records:
-        failed_file = OUTPUT_DIR / f"{config.book_title}.failed_chapters.json"
+        failed_file = OUTPUT_DIR / f"{safe_base_name}.failed_chapters.json"
         dump_failed_chapters(failed_records, failed_file)
 
         print(f"\n⚠️ 有 {len(failed_records)} 个章节抓取失败:")

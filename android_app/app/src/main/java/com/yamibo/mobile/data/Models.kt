@@ -16,11 +16,13 @@ enum class ForumScope(val label: String, val ids: List<Int>) {
 enum class SpeedMode(
     val label: String,
     val delayMinMs: Long,
-    val delayMaxMs: Long
+    val delayMaxMs: Long,
+    val maxConcurrency: Int
 ) {
-    FAST("快速", 850L, 1250L),
-    BALANCED("平衡", 1600L, 2400L),
-    GENTLE("稳妥", 2800L, 4600L)
+    TURBO("极速", 80L, 220L, 3),
+    FAST("快速", 280L, 680L, 2),
+    BALANCED("平衡", 900L, 1600L, 1),
+    GENTLE("稳妥", 1800L, 3200L, 1)
 }
 
 data class SearchResult(
@@ -81,6 +83,8 @@ data class CrawlResult(
     val displayPath: String,
     val fileName: String,
     val savedToDownloads: Boolean,
+    val localWorkingPath: String,
+    val failedRecordsPath: String?,
     val localFallbackPath: String?,
     val chapterCount: Int,
     val failedCount: Int,
@@ -90,4 +94,20 @@ data class CrawlResult(
 data class ExportResult(
     val savedToDownloads: Boolean,
     val displayPath: String
+)
+
+data class FailedChapterRecord(
+    val index: Int,
+    val title: String,
+    val url: String,
+    val marker: String
+)
+
+data class RetryFillResult(
+    val total: Int,
+    val succeeded: Int,
+    val remaining: Int,
+    val localWorkingPath: String,
+    val failedRecordsPath: String?,
+    val remainingTitles: List<String>
 )

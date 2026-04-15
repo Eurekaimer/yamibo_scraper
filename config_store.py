@@ -13,6 +13,7 @@ class AppConfig:
     cookie: str = ""
     username: str = ""
     password: str = ""
+    remember_auth: bool = True
     book_title: str = "TITLE"
     book_author: str = "AUTHOR"
     raw_html_catalog: str = " HTML "
