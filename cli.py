@@ -8,14 +8,16 @@ import re
 def get_main_action() -> str:
     print("\n请选择操作：")
     print("1. 开始抓取")
-    print("2. 修改配置")
-    print("3. 退出")
+    print("2. output 目录 TXT 转 EPUB")
+    print("3. 修改配置")
+    print("4. 启动图形界面 GUI")
+    print("5. 退出")
 
     while True:
-        action = input("请输入对应数字 (1/2/3): ").strip()
-        if action in ["1", "2", "3"]:
+        action = input("请输入对应数字 (1/2/3/4/5): ").strip()
+        if action in ["1", "2", "3", "4", "5"]:
             return action
-        print("输入无效，请重新输入 1、2 或 3。")
+        print("输入无效，请重新输入 1、2、3、4 或 5。")
 
 
 def get_save_choice() -> str:
@@ -30,6 +32,23 @@ def get_save_choice() -> str:
         choice = input("请输入对应数字 (1/2/3): ").strip()
         if choice in ["1", "2", "3"]:
             return choice
+        print("输入无效，请重新输入 1、2 或 3。")
+
+
+def get_crawl_speed_mode() -> str:
+    print("\n请选择抓取速度：")
+    print("1. 快速（约 1s/章，轻微随机）")
+    print("2. 平衡（约 2s/章）")
+    print("3. 稳妥（约 3~4s/章，默认）")
+
+    while True:
+        choice = input("请输入对应数字 (1/2/3): ").strip()
+        if choice == "1":
+            return "fast"
+        if choice == "2":
+            return "balanced"
+        if choice == "3":
+            return "gentle"
         print("输入无效，请重新输入 1、2 或 3。")
 
 
@@ -65,6 +84,23 @@ def get_search_keyword() -> str:
         print("关键词不能为空，请重新输入。")
 
 
+def get_search_forum_scope() -> list[int]:
+    print("\n请选择搜索分区：")
+    print("1. 译文区（forum-55）")
+    print("2. 文学区（forum-49）")
+    print("3. 两区都搜（49 + 55）")
+
+    while True:
+        choice = input("请输入对应数字 (1/2/3): ").strip()
+        if choice == "1":
+            return [55]
+        if choice == "2":
+            return [49]
+        if choice == "3":
+            return [49, 55]
+        print("输入无效，请重新输入 1、2 或 3。")
+
+
 def choose_thread(results: list[dict]) -> dict | None:
     if not results:
         print("未搜索到可用帖子。")
@@ -72,7 +108,21 @@ def choose_thread(results: list[dict]) -> dict | None:
 
     print("\n搜索结果：")
     for idx, item in enumerate(results, start=1):
-        print(f"{idx}. {item['title']}\n   {item['url']}")
+        forum_name = item.get("forum_name", "未知分区")
+        replies = item.get("replies", 0)
+        views = item.get("views", 0)
+        score = item.get("popularity_score", 0)
+        reply_rank = item.get("reply_rank", 0)
+        view_rank = item.get("view_rank", 0)
+        rank_text = (
+            f"回复排序位次: {reply_rank or '-'} | 浏览排序位次: {view_rank or '-'}"
+        )
+        print(
+            f"{idx}. [{forum_name}] {item['title']}\n"
+            f"   回复: {replies} | 查看: {views} | 热度分: {score}\n"
+            f"   {rank_text}\n"
+            f"   {item['url']}"
+        )
 
     while True:
         raw = input("请选择目标帖子序号（输入 q 取消）: ").strip().lower()
@@ -82,6 +132,116 @@ def choose_thread(results: list[dict]) -> dict | None:
             i = int(raw)
             if 1 <= i <= len(results):
                 return results[i - 1]
+        print("输入无效，请重新输入。")
+
+
+def ask_yes_no(question: str, default: bool | None = None) -> bool:
+    suffix = " (y/n): "
+    if default is True:
+        suffix = " (Y/n): "
+    elif default is False:
+        suffix = " (y/N): "
+
+    while True:
+        raw = input(question + suffix).strip().lower()
+        if not raw and default is not None:
+            return default
+        if raw in {"y", "yes"}:
+            return True
+        if raw in {"n", "no"}:
+            return False
+        print("输入无效，请输入 y 或 n。")
+
+
+def ask_preview_confirm() -> bool:
+    return ask_yes_no("预览是否正确，并继续完整抓取？", default=True)
+
+
+def ask_retry_search() -> bool:
+    return ask_yes_no("是否返回搜索并重新选择帖子？", default=True)
+
+
+def choose_book_metadata(
+    current_title: str,
+    current_author: str,
+    suggested_title: str,
+    suggested_author: str,
+) -> tuple[str, str]:
+    print("\n请确认输出书籍信息：")
+    print(f"当前配置标题: {current_title or '(未设置)'}")
+    print(f"推荐标题: {suggested_title or '(未识别)'}")
+    print(f"当前配置作者: {current_author or '(未设置)'}")
+    print(f"推荐作者: {suggested_author or '(未识别)'}")
+
+    print("\n标题选项：")
+    print("1. 使用推荐标题")
+    print("2. 使用当前配置标题")
+    print("3. 手动输入标题")
+
+    while True:
+        t_choice = input("请选择标题来源 (1/2/3): ").strip()
+        if t_choice in {"1", "2", "3"}:
+            break
+        print("输入无效，请重新输入 1、2 或 3。")
+
+    if t_choice == "1":
+        title = suggested_title or current_title
+    elif t_choice == "2":
+        title = current_title
+    else:
+        title = input("请输入标题: ").strip()
+
+    print("\n作者选项：")
+    print("1. 使用推荐作者")
+    print("2. 使用当前配置作者")
+    print("3. 手动输入作者")
+
+    while True:
+        a_choice = input("请选择作者来源 (1/2/3): ").strip()
+        if a_choice in {"1", "2", "3"}:
+            break
+        print("输入无效，请重新输入 1、2 或 3。")
+
+    if a_choice == "1":
+        author = suggested_author or current_author
+    elif a_choice == "2":
+        author = current_author
+    else:
+        author = input("请输入作者: ").strip()
+
+    title = (title or "TITLE").strip()
+    author = (author or "UNKNOWN").strip()
+    return title, author
+
+
+def choose_catalog_candidate(candidates: list[dict]) -> int | None:
+    if not candidates:
+        return None
+
+    print("\n目录候选列表（按评分降序）：")
+    for idx, item in enumerate(candidates, start=1):
+        reason = item.get("score_reason", {})
+        sample_titles = item.get("sample_titles", [])
+        sample_text = " / ".join(sample_titles) if sample_titles else "(无)"
+        print(
+            f"{idx}. {item.get('selector', 'unknown')} | 章节 {item.get('chapter_count', 0)} | "
+            f"总分 {item.get('score', 0):.1f} | "
+            f"链接+{reason.get('base', 0):.1f} PID+{reason.get('pid_bonus', 0):.1f} "
+            f"标题+{reason.get('title_bonus', 0):.1f} 结构+{reason.get('structure_bonus', 0):.1f} "
+            f"数量+{reason.get('size_bonus', 0):.1f} 质量惩罚-{reason.get('quality_penalty', 0):.1f}"
+        )
+        print(f"   示例标题: {sample_text}")
+
+    while True:
+        raw = input("请选择目录候选序号（回车=自动最高分，q=放弃该帖子）: ").strip().lower()
+        if raw == "":
+            return 0
+        if raw == "q":
+            return None
+        if raw.isdigit():
+            i = int(raw)
+            if 1 <= i <= len(candidates):
+                return i - 1
         print("输入无效，请重新输入。")
 
 

@@ -22,7 +22,7 @@ def load_config() -> AppConfig:
     if not CONFIG_PATH.exists():
         return AppConfig()
 
-    data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    data = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
     return AppConfig(**{**asdict(AppConfig()), **data})
 
 
