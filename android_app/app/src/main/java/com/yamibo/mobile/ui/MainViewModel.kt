@@ -57,9 +57,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private var client: YamiboClient? = null
     private var authenticated = false
+    private var lastProgressUpdateMs: Long = 0L
+    private var lastNoticeUpdateMs: Long = 0L
+    private var lastNoticeText: String = ""
 
     private fun appendLog(text: String) {
-        logs = (logs + text).takeLast(500)
+        if (logs.lastOrNull() == text) {
+            status = text
+            return
+        }
+        logs = (logs + text).takeLast(180)
         status = text
     }
 
@@ -295,6 +302,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             outputPath = ""
             outputSavedToDownloads = false
             outputLocalFallbackPath = null
+            lastProgressUpdateMs = 0L
+            lastNoticeUpdateMs = 0L
+            lastNoticeText = ""
             try {
                 val c = ensureAuthenticated(authRequired = true)
                 val chapters = selectedCandidate.chapters.map { it.copy() }
@@ -315,13 +325,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         outputTitle = title,
                         speedMode = speedMode,
                         previewCache = previewCache,
-                        allowLegacyDownloadWrite = legacyStoragePermissionGranted
-                    ) { p ->
-                        val line = "[${p.done}/${p.total}] ${p.currentTitle} | 预计剩余时间: ${c.formatEta(p.etaSeconds)}"
-                        viewModelScope.launch(Dispatchers.Main) {
-                            progressText = line
+                        allowLegacyDownloadWrite = legacyStoragePermissionGranted,
+                        onProgress = { p ->
+                            val now = System.currentTimeMillis()
+                            val shouldRefresh = p.done == p.total || now - lastProgressUpdateMs >= 350L
+                            if (shouldRefresh) {
+                                lastProgressUpdateMs = now
+                                val line = "[${p.done}/${p.total}] ${p.currentTitle} | 预计剩余时间: ${c.formatEta(p.etaSeconds)}"
+                                viewModelScope.launch(Dispatchers.Main) {
+                                    progressText = line
+                                }
+                            }
+                        },
+                        onNotice = { msg ->
+                            val now = System.currentTimeMillis()
+                            val tooFrequent = now - lastNoticeUpdateMs < 700L
+                            if (!tooFrequent || msg != lastNoticeText) {
+                                lastNoticeUpdateMs = now
+                                lastNoticeText = msg
+                                viewModelScope.launch(Dispatchers.Main) {
+                                    appendLog(msg)
+                                }
+                            }
                         }
-                    }
+                    )
                 }
 
                 outputPath = result.displayPath

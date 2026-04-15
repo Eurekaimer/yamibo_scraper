@@ -21,22 +21,33 @@ Push-Location $androidDir
 try {
     if ($Release) {
         gradle assembleRelease
-        $apk = Join-Path $androidDir "app\build\outputs\apk\release\app-release.apk"
+        $apkDir = Join-Path $androidDir "app\build\outputs\apk\release"
+        $apks = @(Get-ChildItem -Path $apkDir -Filter *.apk -File -ErrorAction SilentlyContinue)
     } else {
         gradle assembleDebug
         $apk = Join-Path $androidDir "app\build\outputs\apk\debug\app-debug.apk"
+        $apks = @()
+        if (Test-Path $apk) {
+            $apks = @((Get-Item $apk))
+        }
     }
 
-    if (Test-Path $apk) {
+    if ($apks.Count -gt 0) {
         $releaseDir = Join-Path $repoRoot "release"
         if (-not (Test-Path $releaseDir)) {
             New-Item -ItemType Directory -Path $releaseDir | Out-Null
         }
-        $target = Join-Path $releaseDir (Split-Path $apk -Leaf)
-        Copy-Item -LiteralPath $apk -Destination $target -Force
-        Write-Host "APK 已复制到: $target" -ForegroundColor Green
+        foreach ($item in $apks) {
+            $target = Join-Path $releaseDir $item.Name
+            Copy-Item -LiteralPath $item.FullName -Destination $target -Force
+            Write-Host "APK 已复制到: $target" -ForegroundColor Green
+        }
     } else {
-        Write-Host "构建完成但未找到 APK: $apk" -ForegroundColor Yellow
+        if ($Release) {
+            Write-Host "构建完成但未找到 release APK，检查目录: $apkDir" -ForegroundColor Yellow
+        } else {
+            Write-Host "构建完成但未找到 APK: $apk" -ForegroundColor Yellow
+        }
     }
 } finally {
     Pop-Location

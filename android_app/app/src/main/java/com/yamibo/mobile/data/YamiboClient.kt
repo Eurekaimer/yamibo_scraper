@@ -20,10 +20,10 @@ import java.net.HttpCookie
 import java.net.URI
 import java.net.URLEncoder
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 import kotlin.math.roundToLong
 import kotlin.random.Random
 
-private const val MAX_RETRIES = 5
 private const val RETRY_JITTER_MS_MAX = 800L
 private const val MIN_CATALOG_CHAPTERS = 3
 private const val DEFAULT_USER_AGENT =
@@ -47,6 +47,13 @@ private data class SaveTarget(
     val localFallbackPath: String?
 )
 
+private data class RetryPolicy(
+    val maxAttempts: Int,
+    val initialDelayMs: Long,
+    val maxDelayMs: Long,
+    val backoffMultiplier: Double
+)
+
 class YamiboClient(
     private val context: Context,
     private val userAgent: String = DEFAULT_USER_AGENT
@@ -59,6 +66,10 @@ class YamiboClient(
     private val cookieManager = CookieManager(null, CookiePolicy.ACCEPT_ALL)
     private val client = OkHttpClient.Builder()
         .cookieJar(JavaNetCookieJar(cookieManager))
+        .connectTimeout(12, TimeUnit.SECONDS)
+        .readTimeout(12, TimeUnit.SECONDS)
+        .writeTimeout(12, TimeUnit.SECONDS)
+        .callTimeout(18, TimeUnit.SECONDS)
         .build()
 
     fun clearCookies() {
@@ -288,12 +299,13 @@ class YamiboClient(
         previewCount: Int,
         snippetLength: Int = 120
     ): Pair<List<PreviewItem>, Map<Int, String>> {
+        val retryPolicy = retryPolicyForSpeed(SpeedMode.FAST)
         val count = previewCount.coerceAtLeast(1).coerceAtMost(chapters.size)
         val previewItems = mutableListOf<PreviewItem>()
         val cache = mutableMapOf<Int, String>()
 
         for (i in 0 until count) {
-            val content = fetchChapterContent(chapters[i].url)
+            val content = fetchChapterContent(chapters[i].url, retryPolicy)
             cache[i] = content
             val snippet = content
                 .replace(Regex("\\s+"), " ")
@@ -315,16 +327,25 @@ class YamiboClient(
         speedMode: SpeedMode,
         previewCache: Map<Int, String>,
         allowLegacyDownloadWrite: Boolean,
-        onProgress: (CrawlProgress) -> Unit
+        onProgress: (CrawlProgress) -> Unit,
+        onNotice: ((String) -> Unit)? = null
     ): CrawlResult {
         val safeName = sanitizeFilename(outputTitle.ifBlank { "TITLE" })
         val fileName = "$safeName.txt"
+        val retryPolicy = retryPolicyForSpeed(speedMode)
 
         val failedTitles = mutableListOf<String>()
         val startedAt = System.currentTimeMillis()
 
         chapters.forEachIndexed { index, chapter ->
-            val content = previewCache[index] ?: fetchChapterContent(chapter.url)
+            val content = previewCache[index] ?: fetchChapterContent(
+                chapter.url,
+                retryPolicy
+            ) { nextAttempt, maxAttempts, waitMs, reason ->
+                onNotice?.invoke(
+                    "《${chapter.title}》请求失败，准备重试 $nextAttempt/$maxAttempts，等待 ${"%.1f".format(waitMs / 1000.0)}s：$reason"
+                )
+            }
             if (content.startsWith("【最终失败")) {
                 failedTitles += chapter.title
             }
@@ -476,6 +497,29 @@ class YamiboClient(
             savedToDownloads = false,
             localFallbackPath = output.absolutePath
         )
+    }
+
+    private fun retryPolicyForSpeed(speedMode: SpeedMode): RetryPolicy {
+        return when (speedMode) {
+            SpeedMode.FAST -> RetryPolicy(
+                maxAttempts = 3,
+                initialDelayMs = 250L,
+                maxDelayMs = 1200L,
+                backoffMultiplier = 1.6
+            )
+            SpeedMode.BALANCED -> RetryPolicy(
+                maxAttempts = 4,
+                initialDelayMs = 600L,
+                maxDelayMs = 3200L,
+                backoffMultiplier = 1.8
+            )
+            SpeedMode.GENTLE -> RetryPolicy(
+                maxAttempts = 5,
+                initialDelayMs = 1200L,
+                maxDelayMs = 6000L,
+                backoffMultiplier = 2.0
+            )
+        }
     }
 
     fun suggestMetaFromThreadTitle(rawTitle: String): Pair<String, String> {
@@ -866,10 +910,15 @@ class YamiboClient(
         }
     }
 
-    private suspend fun fetchChapterContent(url: String): String {
+    private suspend fun fetchChapterContent(
+        url: String,
+        retryPolicy: RetryPolicy,
+        onRetry: ((nextAttempt: Int, maxAttempts: Int, waitMs: Long, reason: String) -> Unit)? = null
+    ): String {
         val pid = extractPid(url)
+        var waitMs = retryPolicy.initialDelayMs
 
-        repeat(MAX_RETRIES) { attempt ->
+        for (attempt in 1..retryPolicy.maxAttempts) {
             try {
                 val html = getText(url)
                 val doc = Jsoup.parse(html, BASE_URL)
@@ -909,11 +958,20 @@ class YamiboClient(
 
                 return text
             } catch (e: Exception) {
-                if (attempt == MAX_RETRIES - 1) {
+                if (attempt >= retryPolicy.maxAttempts) {
                     return "【最终失败：${e.message ?: "unknown"}】"
                 }
-                val retrySleep = (1L shl attempt) * 1000L + Random.nextLong(0, RETRY_JITTER_MS_MAX + 1)
-                delay(retrySleep)
+
+                val jitter = Random.nextLong(0, RETRY_JITTER_MS_MAX + 1)
+                val finalWaitMs = waitMs + jitter
+                onRetry?.invoke(
+                    attempt + 1,
+                    retryPolicy.maxAttempts,
+                    finalWaitMs,
+                    e.message ?: "unknown"
+                )
+                delay(finalWaitMs)
+                waitMs = (waitMs * retryPolicy.backoffMultiplier).toLong().coerceAtMost(retryPolicy.maxDelayMs)
             }
         }
 

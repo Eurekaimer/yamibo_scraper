@@ -18,20 +18,25 @@
 3. 首次同步完成后，点击 `Build > Build APK(s)`
 4. 产物位置通常在：
    - `android_app/app/build/outputs/apk/debug/app-debug.apk`
+   - `android_app/app/build/outputs/apk/release/*.apk`
 
 ## 命令行打包 APK（有 Android SDK 时）
 
 在 `android_app` 目录执行：
 
 ```bash
-gradle assembleDebug
+gradle assembleDebug assembleRelease
 ```
 
 如果你用的是 Gradle Wrapper，也可以改成：
 
 ```bash
-./gradlew assembleDebug
+./gradlew assembleDebug assembleRelease
 ```
+
+GitHub Actions 会上传两个构建产物：
+- `yamibo-mobile-debug-apk`
+- `yamibo-mobile-release-apk`
 
 ## 手机端输出路径
 

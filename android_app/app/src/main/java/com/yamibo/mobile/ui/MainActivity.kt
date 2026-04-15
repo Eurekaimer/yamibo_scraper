@@ -431,10 +431,24 @@ private fun LogCard(vm: MainViewModel) {
                 .height(220.dp)
                 .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
                 .background(MaterialTheme.colorScheme.surface)
-                .padding(10.dp)
+                .padding(6.dp)
         ) {
-            val text = if (vm.logs.isEmpty()) "暂无日志" else vm.logs.joinToString("\n")
-            Text(text = text, fontSize = 12.sp, lineHeight = 18.sp)
+            if (vm.logs.isEmpty()) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("暂无日志", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                }
+            } else {
+                LazyColumn(modifier = Modifier.fillMaxSize()) {
+                    itemsIndexed(vm.logs) { _, line ->
+                        Text(
+                            text = line,
+                            fontSize = 12.sp,
+                            lineHeight = 18.sp,
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+            }
         }
     }
 }
