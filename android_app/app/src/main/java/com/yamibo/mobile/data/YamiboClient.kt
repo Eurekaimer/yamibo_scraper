@@ -117,7 +117,10 @@ class YamiboClient(
         val formhash = loginForm?.selectFirst("input[name=formhash]")?.attr("value")
             ?.takeIf { it.isNotBlank() }
             ?: doc.selectFirst("input[name=formhash]")?.attr("value")?.takeIf { it.isNotBlank() }
-            ?: Regex("formhash\\"\\s+value=\\"([a-zA-Z0-9]+)\\"").find(loginHtml)?.groupValues?.getOrNull(1)
+            ?: Regex("""formhash"\s+value="([a-zA-Z0-9]+)""")
+                .find(loginHtml)
+                ?.groupValues
+                ?.getOrNull(1)
             ?: throw IllegalStateException("未能提取登录 formhash，请检查登录页面结构")
 
         val body = FormBody.Builder()
