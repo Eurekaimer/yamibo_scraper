@@ -237,7 +237,7 @@ private fun SessionCard(vm: MainViewModel) {
             options = AuthMode.entries,
             selected = vm.authMode,
             optionLabel = { it.label },
-            onSelected = vm::setAuthMode
+            onSelected = vm::updateAuthMode
         )
 
         OutlinedTextField(
@@ -300,7 +300,7 @@ private fun SessionCard(vm: MainViewModel) {
         RowWithSwitch(
             label = "记住账号/密码/Cookie",
             checked = vm.rememberAuth,
-            onCheckedChange = vm::setRememberAuth
+            onCheckedChange = vm::updateRememberAuth
         )
 
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -338,7 +338,7 @@ private fun SearchCard(vm: MainViewModel) {
             options = ForumScope.entries,
             selected = vm.forumScope,
             optionLabel = { it.label },
-            onSelected = vm::setForumScope
+            onSelected = vm::updateForumScope
         )
 
         Button(
@@ -469,7 +469,7 @@ private fun CrawlCard(
             selected = vm.speedMode,
             options = SpeedMode.entries,
             optionLabel = { it.label },
-            onSelected = vm::setSpeedMode
+            onSelected = vm::updateSpeedMode
         )
 
         Text(

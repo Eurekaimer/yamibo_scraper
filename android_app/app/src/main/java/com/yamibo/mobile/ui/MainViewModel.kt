@@ -165,12 +165,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         legacyStoragePermissionGranted = granted
     }
 
-    fun setAuthMode(mode: AuthMode) {
+    fun updateAuthMode(mode: AuthMode) {
         authMode = mode
         persistNow()
     }
 
-    fun setRememberAuth(remember: Boolean) {
+    fun updateRememberAuth(remember: Boolean) {
         rememberAuth = remember
         if (!remember) {
             username = ""
@@ -181,12 +181,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         persistNow()
     }
 
-    fun setForumScope(scope: ForumScope) {
+    fun updateForumScope(scope: ForumScope) {
         forumScope = scope
         persistNow()
     }
 
-    fun setSpeedMode(mode: SpeedMode) {
+    fun updateSpeedMode(mode: SpeedMode) {
         speedMode = mode
         liveSpeedMode = mode
         persistNow()
@@ -768,4 +768,3 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
     }
 }
-
