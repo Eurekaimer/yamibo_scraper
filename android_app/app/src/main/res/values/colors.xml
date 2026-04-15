@@ -1,0 +1,8 @@
+﻿<resources>
+    <color name="red_50">#FFF5F5</color>
+    <color name="red_100">#FEE2E2</color>
+    <color name="red_300">#FCA5A5</color>
+    <color name="red_600">#DC2626</color>
+    <color name="red_700">#B91C1C</color>
+    <color name="surface_light">#FFFBFB</color>
+</resources>

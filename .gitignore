@@ -17,3 +17,8 @@ output/
 *.txt
 *.epub
 yamibo_config.json
+
+# Android
+android_app/.gradle/
+android_app/local.properties
+android_app/**/build/
