@@ -1,6 +1,7 @@
-﻿package com.yamibo.mobile.ui
+package com.yamibo.mobile.ui
 
 import android.app.Application
+import android.content.Context
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -10,6 +11,7 @@ import com.yamibo.mobile.data.AuthMode
 import com.yamibo.mobile.data.CatalogCandidate
 import com.yamibo.mobile.data.ForumScope
 import com.yamibo.mobile.data.PreviewItem
+import com.yamibo.mobile.data.SavedOutputFile
 import com.yamibo.mobile.data.SearchResult
 import com.yamibo.mobile.data.SpeedMode
 import com.yamibo.mobile.data.YamiboClient
@@ -19,13 +21,14 @@ import kotlinx.coroutines.withContext
 import kotlin.math.max
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
-    var userAgent by mutableStateOf(
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-    )
+    private val prefs = application.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+
+    var userAgent by mutableStateOf(DEFAULT_UA)
     var authMode by mutableStateOf(AuthMode.ACCOUNT)
     var username by mutableStateOf("")
     var password by mutableStateOf("")
     var cookie by mutableStateOf("")
+    var rememberAuth by mutableStateOf(true)
     var loginStatusText by mutableStateOf("未登录")
     var loginStatusOk by mutableStateOf(false)
 
@@ -33,9 +36,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var forumScope by mutableStateOf(ForumScope.BOTH)
 
     var speedMode by mutableStateOf(SpeedMode.FAST)
+        private set
+    private var liveSpeedMode: SpeedMode = SpeedMode.FAST
+
     var previewCountText by mutableStateOf("2")
     var outputTitle by mutableStateOf("")
     var outputAuthor by mutableStateOf("")
+    var enableOverlay by mutableStateOf(false)
 
     var searchResults by mutableStateOf(emptyList<SearchResult>())
     var selectedSearchIndex by mutableStateOf(-1)
@@ -59,6 +66,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var latestFailedTitles by mutableStateOf(emptyList<String>())
     var legacyStoragePermissionGranted by mutableStateOf(false)
 
+    var savedFiles by mutableStateOf(emptyList<SavedOutputFile>())
+    var selectedSavedFileIndex by mutableStateOf(-1)
+
     var logs by mutableStateOf(emptyList<String>())
 
     private var client: YamiboClient? = null
@@ -67,12 +77,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var lastNoticeUpdateMs: Long = 0L
     private var lastNoticeText: String = ""
 
+    init {
+        restorePrefs()
+        refreshSavedFiles()
+    }
+
     private fun appendLog(text: String) {
         if (logs.lastOrNull() == text) {
             status = text
             return
         }
-        logs = (logs + text).takeLast(180)
+        logs = (logs + text).takeLast(220)
         status = text
     }
 
@@ -84,13 +99,58 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (forceReset || client == null) {
             client = YamiboClient(
                 context = getApplication(),
-                userAgent = userAgent.ifBlank {
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-                }
+                userAgent = userAgent.ifBlank { DEFAULT_UA }
             )
             authenticated = false
         }
         return client!!
+    }
+
+    private fun restorePrefs() {
+        userAgent = prefs.getString(KEY_USER_AGENT, DEFAULT_UA) ?: DEFAULT_UA
+        authMode = parseAuthMode(prefs.getString(KEY_AUTH_MODE, AuthMode.ACCOUNT.name))
+        rememberAuth = prefs.getBoolean(KEY_REMEMBER_AUTH, true)
+        if (rememberAuth) {
+            username = prefs.getString(KEY_USERNAME, "").orEmpty()
+            password = prefs.getString(KEY_PASSWORD, "").orEmpty()
+            cookie = prefs.getString(KEY_COOKIE, "").orEmpty()
+        } else {
+            username = ""
+            password = ""
+            cookie = ""
+        }
+        keyword = prefs.getString(KEY_KEYWORD, "").orEmpty()
+        forumScope = parseForumScope(prefs.getString(KEY_FORUM_SCOPE, ForumScope.BOTH.name))
+        speedMode = parseSpeedMode(prefs.getString(KEY_SPEED_MODE, SpeedMode.FAST.name))
+        liveSpeedMode = speedMode
+        previewCountText = prefs.getString(KEY_PREVIEW_COUNT, "2").orEmpty().ifBlank { "2" }
+        outputTitle = prefs.getString(KEY_OUTPUT_TITLE, "").orEmpty()
+        outputAuthor = prefs.getString(KEY_OUTPUT_AUTHOR, "").orEmpty()
+        enableOverlay = prefs.getBoolean(KEY_ENABLE_OVERLAY, false)
+    }
+
+    fun persistNow() {
+        val editor = prefs.edit()
+        editor.putString(KEY_USER_AGENT, userAgent)
+        editor.putString(KEY_AUTH_MODE, authMode.name)
+        editor.putBoolean(KEY_REMEMBER_AUTH, rememberAuth)
+        if (rememberAuth) {
+            editor.putString(KEY_USERNAME, username)
+            editor.putString(KEY_PASSWORD, password)
+            editor.putString(KEY_COOKIE, cookie)
+        } else {
+            editor.remove(KEY_USERNAME)
+            editor.remove(KEY_PASSWORD)
+            editor.remove(KEY_COOKIE)
+        }
+        editor.putString(KEY_KEYWORD, keyword)
+        editor.putString(KEY_FORUM_SCOPE, forumScope.name)
+        editor.putString(KEY_SPEED_MODE, speedMode.name)
+        editor.putString(KEY_PREVIEW_COUNT, previewCountText)
+        editor.putString(KEY_OUTPUT_TITLE, outputTitle)
+        editor.putString(KEY_OUTPUT_AUTHOR, outputAuthor)
+        editor.putBoolean(KEY_ENABLE_OVERLAY, enableOverlay)
+        editor.apply()
     }
 
     fun resetSession() {
@@ -103,6 +163,41 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setLegacyStoragePermission(granted: Boolean) {
         legacyStoragePermissionGranted = granted
+    }
+
+    fun setAuthMode(mode: AuthMode) {
+        authMode = mode
+        persistNow()
+    }
+
+    fun setRememberAuth(remember: Boolean) {
+        rememberAuth = remember
+        if (!remember) {
+            username = ""
+            password = ""
+            cookie = ""
+            authenticated = false
+        }
+        persistNow()
+    }
+
+    fun setForumScope(scope: ForumScope) {
+        forumScope = scope
+        persistNow()
+    }
+
+    fun setSpeedMode(mode: SpeedMode) {
+        speedMode = mode
+        liveSpeedMode = mode
+        persistNow()
+        if (isBusy) {
+            appendLog("已切换速度：${mode.label}（下一章生效）")
+        }
+    }
+
+    fun setOverlayEnabled(enabled: Boolean) {
+        enableOverlay = enabled
+        persistNow()
     }
 
     private suspend fun ensureAuthenticated(authRequired: Boolean = true, forceReset: Boolean = false): YamiboClient {
@@ -128,6 +223,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             loginStatusText = "账号登录成功"
             loginStatusOk = true
             appendLog("账号登录成功")
+            persistNow()
             return c
         }
 
@@ -144,6 +240,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         loginStatusText = "Cookie 已载入"
         loginStatusOk = true
         appendLog("Cookie 已载入")
+        persistNow()
         return c
     }
 
@@ -155,6 +252,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             isBusy = true
             try {
+                persistNow()
                 ensureAuthenticated(authRequired = true, forceReset = true)
                 if (loginStatusText == "未登录") {
                     loginStatusText = "登录完成"
@@ -185,6 +283,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             isBusy = true
             try {
+                persistNow()
                 val c = ensureAuthenticated(authRequired = true)
                 val results = withContext(Dispatchers.IO) {
                     c.searchThreads(
@@ -238,6 +337,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             isBusy = true
             try {
+                persistNow()
                 val c = ensureAuthenticated(authRequired = true)
                 val candidates = withContext(Dispatchers.IO) {
                     c.extractCatalogCandidatesFromThread(selectedThread.url)
@@ -272,6 +372,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             isBusy = true
             try {
+                persistNow()
                 val c = ensureAuthenticated(authRequired = true)
                 val desiredCount = parsePreviewCount()
                 val (previewList, cache) = withContext(Dispatchers.IO) {
@@ -327,7 +428,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             lastProgressUpdateMs = 0L
             lastNoticeUpdateMs = 0L
             lastNoticeText = ""
+
+            val app = getApplication<Application>()
+            var overlayStarted = false
             try {
+                persistNow()
                 val c = ensureAuthenticated(authRequired = true)
                 val chapters = selectedCandidate.chapters.map { it.copy() }
                 val title = outputTitle.trim().ifBlank {
@@ -339,7 +444,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
 
-                appendLog("开始抓取，共 ${chapters.size} 章，速度：${speedMode.label}")
+                appendLog("开始抓取，共 ${chapters.size} 章，当前速度：${speedMode.label}")
+                DownloadOverlayService.start(app, "准备抓取：$title", enableOverlay)
+                overlayStarted = true
 
                 val result = withContext(Dispatchers.IO) {
                     c.crawlChaptersToTxt(
@@ -353,7 +460,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             val shouldRefresh = p.done == p.total || now - lastProgressUpdateMs >= 350L
                             if (shouldRefresh) {
                                 lastProgressUpdateMs = now
-                                val line = "[${p.done}/${p.total}] ${p.currentTitle} | 预计剩余时间: ${c.formatEta(p.etaSeconds)}"
+                                val etaText = c.formatEta(p.etaSeconds)
+                                val line = "[${p.done}/${p.total}] ${p.currentTitle} | 预计剩余时间: $etaText"
+                                DownloadOverlayService.update(
+                                    app,
+                                    p.currentTitle,
+                                    p.done,
+                                    p.total,
+                                    etaText
+                                )
                                 viewModelScope.launch(Dispatchers.Main) {
                                     progressText = line
                                 }
@@ -369,13 +484,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                     appendLog(msg)
                                 }
                             }
-                        }
+                        },
+                        speedProvider = { liveSpeedMode }
                     )
                 }
 
                 outputPath = result.displayPath
                 outputSavedToDownloads = result.savedToDownloads
-                outputLocalFallbackPath = result.localFallbackPath
+                outputLocalFallbackPath = result.localFallbackPath ?: result.localWorkingPath
                 latestLocalWorkingPath = result.localWorkingPath
                 latestFailedRecordsPath = result.failedRecordsPath
                 latestFailedCount = result.failedCount
@@ -387,17 +503,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 if (result.failedCount > 0) {
                     appendLog("有 ${result.failedCount} 章抓取失败，失败清单如下:")
-                    result.failedTitles.forEachIndexed { idx, title ->
-                        appendLog("失败[${idx + 1}]: $title")
+                    result.failedTitles.forEachIndexed { idx, t ->
+                        appendLog("失败[${idx + 1}]: $t")
                     }
                     result.failedRecordsPath?.let { path ->
                         appendLog("失败记录已保存: $path")
                     }
                 }
+                refreshSavedFiles()
             } catch (e: Exception) {
                 appendLog("抓取失败: ${e.message}")
             } finally {
+                if (overlayStarted) {
+                    DownloadOverlayService.stop(app)
+                }
                 isBusy = false
+                persistNow()
             }
         }
     }
@@ -416,18 +537,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             isBusy = true
             try {
+                persistNow()
                 val c = ensureAuthenticated(authRequired = true)
-                appendLog("开始仅重试失败章节并回填...")
+                appendLog("开始仅重试失败章节并回填（当前速度：${speedMode.label}）...")
                 val result = withContext(Dispatchers.IO) {
                     c.retryFailedAndPatch(
                         localWorkingPath = localPath,
                         failedRecordsPath = failedPath,
-                        speedMode = speedMode
-                    ) { msg ->
-                        viewModelScope.launch(Dispatchers.Main) {
-                            appendLog(msg)
-                        }
-                    }
+                        speedMode = speedMode,
+                        onNotice = { msg ->
+                            viewModelScope.launch(Dispatchers.Main) {
+                                appendLog(msg)
+                            }
+                        },
+                        speedProvider = { liveSpeedMode }
+                    )
                 }
                 latestLocalWorkingPath = result.localWorkingPath
                 latestFailedRecordsPath = result.failedRecordsPath
@@ -442,15 +566,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     appendLog("所有失败章节已回填，可重新导出到 Download。")
                 } else {
                     appendLog("剩余失败清单:")
-                    result.remainingTitles.forEachIndexed { idx, title ->
-                        appendLog("剩余[${idx + 1}]: $title")
+                    result.remainingTitles.forEachIndexed { idx, t ->
+                        appendLog("剩余[${idx + 1}]: $t")
                     }
                     appendLog("仍有失败章节，稍后可再次重试。")
                 }
+                refreshSavedFiles()
             } catch (e: Exception) {
                 appendLog("失败章节回填失败: ${e.message}")
             } finally {
                 isBusy = false
+                persistNow()
             }
         }
     }
@@ -472,6 +598,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             isBusy = true
             try {
+                persistNow()
                 val c = ensureAuthenticated(authRequired = false)
                 val desiredName = outputTitle.trim().ifBlank { "TITLE" }
                 val exported = withContext(Dispatchers.IO) {
@@ -483,16 +610,113 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 outputPath = exported.displayPath
                 outputSavedToDownloads = exported.savedToDownloads
+                outputLocalFallbackPath = exported.localFallbackPath ?: source
                 if (exported.savedToDownloads) {
                     appendLog("导出成功: ${exported.displayPath}")
                 } else {
                     appendLog("导出失败，仍保留在应用目录")
                 }
+                refreshSavedFiles()
             } catch (e: Exception) {
                 appendLog("导出失败: ${e.message}")
             } finally {
                 isBusy = false
+                persistNow()
             }
+        }
+    }
+
+    fun convertSelectedTxtToEpub() {
+        if (isBusy) {
+            return
+        }
+        val selected = savedFiles.getOrNull(selectedSavedFileIndex)
+        if (selected == null) {
+            appendLog("请先在文件列表里选择一个 TXT")
+            return
+        }
+        if (!selected.name.lowercase().endsWith(".txt")) {
+            appendLog("当前选中的不是 TXT 文件，无法转换 EPUB")
+            return
+        }
+
+        viewModelScope.launch {
+            isBusy = true
+            try {
+                persistNow()
+                val c = ensureAuthenticated(authRequired = false)
+                val bookTitle = outputTitle.trim().ifBlank {
+                    selected.name.substringBeforeLast(".")
+                }
+                val bookAuthor = outputAuthor.trim().ifBlank { "UNKNOWN" }
+                val result = withContext(Dispatchers.IO) {
+                    c.convertTxtToEpub(
+                        sourcePath = selected.absolutePath,
+                        outputTitle = bookTitle,
+                        outputAuthor = bookAuthor,
+                        allowLegacyDownloadWrite = legacyStoragePermissionGranted
+                    )
+                }
+                outputPath = result.displayPath
+                outputSavedToDownloads = result.savedToDownloads
+                outputLocalFallbackPath = result.localFallbackPath
+                appendLog("EPUB 转换完成: ${result.displayPath}")
+                refreshSavedFiles()
+            } catch (e: Exception) {
+                appendLog("EPUB 转换失败: ${e.message}")
+            } finally {
+                isBusy = false
+                persistNow()
+            }
+        }
+    }
+
+    fun refreshSavedFiles() {
+        viewModelScope.launch {
+            val c = ensureClient(forceReset = false)
+            val list = withContext(Dispatchers.IO) {
+                c.listSavedOutputFiles()
+            }
+            savedFiles = list
+            if (savedFiles.isEmpty()) {
+                selectedSavedFileIndex = -1
+            } else if (selectedSavedFileIndex !in savedFiles.indices) {
+                selectedSavedFileIndex = 0
+            }
+        }
+    }
+
+    fun chooseSavedFile(index: Int) {
+        selectedSavedFileIndex = max(-1, index)
+    }
+
+    fun openSelectedFile() {
+        val selected = savedFiles.getOrNull(selectedSavedFileIndex)
+        if (selected == null) {
+            appendLog("请先在列表中选择文件")
+            return
+        }
+        val c = ensureClient(forceReset = false)
+        val ok = c.openFileWithSystem(selected.absolutePath)
+        if (ok) {
+            appendLog("已调用系统打开: ${selected.name}")
+        } else {
+            appendLog("打开失败，请确认设备已安装可读取该格式的应用")
+        }
+    }
+
+    fun openLatestOutput() {
+        val path = outputLocalFallbackPath ?: latestLocalWorkingPath
+        if (path.isNullOrBlank()) {
+            appendLog("当前没有可打开的抓取文件")
+            return
+        }
+        val c = ensureClient(forceReset = false)
+        val ok = c.openFileWithSystem(path)
+        if (ok) {
+            appendLog("已调用系统打开最新文件")
+        } else {
+            appendLog("打开失败，请检查文件是否存在")
         }
     }
 
@@ -512,4 +736,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         previewCache = emptyMap()
         previewConfirmed = false
     }
+
+    private fun parseAuthMode(raw: String?): AuthMode {
+        return AuthMode.entries.firstOrNull { it.name == raw } ?: AuthMode.ACCOUNT
+    }
+
+    private fun parseForumScope(raw: String?): ForumScope {
+        return ForumScope.entries.firstOrNull { it.name == raw } ?: ForumScope.BOTH
+    }
+
+    private fun parseSpeedMode(raw: String?): SpeedMode {
+        return SpeedMode.entries.firstOrNull { it.name == raw } ?: SpeedMode.FAST
+    }
+
+    companion object {
+        private const val PREF_NAME = "yamibo_mobile_config"
+        private const val KEY_USER_AGENT = "user_agent"
+        private const val KEY_AUTH_MODE = "auth_mode"
+        private const val KEY_USERNAME = "username"
+        private const val KEY_PASSWORD = "password"
+        private const val KEY_COOKIE = "cookie"
+        private const val KEY_REMEMBER_AUTH = "remember_auth"
+        private const val KEY_KEYWORD = "keyword"
+        private const val KEY_FORUM_SCOPE = "forum_scope"
+        private const val KEY_SPEED_MODE = "speed_mode"
+        private const val KEY_PREVIEW_COUNT = "preview_count"
+        private const val KEY_OUTPUT_TITLE = "output_title"
+        private const val KEY_OUTPUT_AUTHOR = "output_author"
+        private const val KEY_ENABLE_OVERLAY = "enable_overlay"
+        private const val DEFAULT_UA =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    }
 }
+

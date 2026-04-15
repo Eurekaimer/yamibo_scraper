@@ -1,9 +1,12 @@
 ﻿package com.yamibo.mobile.ui
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -44,10 +47,12 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -62,6 +67,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.yamibo.mobile.data.AuthMode
 import com.yamibo.mobile.data.ForumScope
@@ -82,7 +89,20 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun YamiboMobileApp(vm: MainViewModel = viewModel()) {
     val context = LocalContext.current
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+
     val needsLegacyPermission = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
+    val needsNotifyPermission = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+    var notifyGranted by remember {
+        mutableStateOf(
+            !needsNotifyPermission ||
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+
     var legacyStorageGranted by remember {
         mutableStateOf(
             !needsLegacyPermission ||
@@ -92,14 +112,59 @@ private fun YamiboMobileApp(vm: MainViewModel = viewModel()) {
                 ) == PackageManager.PERMISSION_GRANTED
         )
     }
+    var overlayGranted by remember {
+        mutableStateOf(
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(context)
+        )
+    }
+
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
         legacyStorageGranted = granted
         vm.setLegacyStoragePermission(granted)
     }
+    val notifyPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        notifyGranted = granted
+    }
+
+    val requestOverlayPermission: () -> Unit = {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val intent = Intent(
+                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:${context.packageName}")
+            )
+            context.startActivity(intent)
+        }
+    }
+
     LaunchedEffect(needsLegacyPermission, legacyStorageGranted) {
         vm.setLegacyStoragePermission(!needsLegacyPermission || legacyStorageGranted)
+    }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> {
+                    overlayGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(context)
+                    notifyGranted = !needsNotifyPermission ||
+                        ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.POST_NOTIFICATIONS
+                        ) == PackageManager.PERMISSION_GRANTED
+                }
+
+                Lifecycle.Event.ON_STOP -> vm.persistNow()
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            vm.persistNow()
+        }
     }
 
     val scheme = lightColorScheme(
@@ -140,7 +205,6 @@ private fun YamiboMobileApp(vm: MainViewModel = viewModel()) {
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     SessionCard(vm)
-                    LogCard(vm)
                     SearchCard(vm)
                     CatalogCard(vm)
                     CrawlCard(
@@ -148,8 +212,16 @@ private fun YamiboMobileApp(vm: MainViewModel = viewModel()) {
                         needLegacyPermission = needsLegacyPermission && !legacyStorageGranted,
                         onRequestLegacyPermission = {
                             permissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-                        }
+                        },
+                        needNotifyPermission = needsNotifyPermission && !notifyGranted,
+                        onRequestNotifyPermission = {
+                            notifyPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        },
+                        overlayGranted = overlayGranted,
+                        onRequestOverlayPermission = requestOverlayPermission
                     )
+                    LogCard(vm)
+                    SavedFilesCard(vm)
                 }
             }
         }
@@ -164,7 +236,7 @@ private fun SessionCard(vm: MainViewModel) {
             options = AuthMode.entries,
             selected = vm.authMode,
             optionLabel = { it.label },
-            onSelected = { vm.authMode = it }
+            onSelected = vm::setAuthMode
         )
 
         OutlinedTextField(
@@ -178,14 +250,20 @@ private fun SessionCard(vm: MainViewModel) {
         if (vm.authMode == AuthMode.ACCOUNT) {
             OutlinedTextField(
                 value = vm.username,
-                onValueChange = { vm.username = it },
+                onValueChange = {
+                    vm.username = it
+                    if (vm.rememberAuth) vm.persistNow()
+                },
                 label = { Text("账号") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
             OutlinedTextField(
                 value = vm.password,
-                onValueChange = { vm.password = it },
+                onValueChange = {
+                    vm.password = it
+                    if (vm.rememberAuth) vm.persistNow()
+                },
                 label = { Text("密码") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
@@ -198,7 +276,10 @@ private fun SessionCard(vm: MainViewModel) {
         } else {
             OutlinedTextField(
                 value = vm.cookie,
-                onValueChange = { vm.cookie = it },
+                onValueChange = {
+                    vm.cookie = it
+                    if (vm.rememberAuth) vm.persistNow()
+                },
                 label = { Text("Cookie") },
                 modifier = Modifier.fillMaxWidth()
             )
@@ -213,6 +294,12 @@ private fun SessionCard(vm: MainViewModel) {
             text = "建议: 网络波动或频繁超时时，优先使用稳定代理再抓取，成功率和速度都会明显更好。",
             fontSize = 12.sp,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
+        )
+
+        RowWithSwitch(
+            label = "记住账号/密码/Cookie",
+            checked = vm.rememberAuth,
+            onCheckedChange = vm::setRememberAuth
         )
 
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -250,7 +337,7 @@ private fun SearchCard(vm: MainViewModel) {
             options = ForumScope.entries,
             selected = vm.forumScope,
             optionLabel = { it.label },
-            onSelected = { vm.forumScope = it }
+            onSelected = vm::setForumScope
         )
 
         Button(
@@ -348,19 +435,29 @@ private fun CatalogCard(vm: MainViewModel) {
 private fun CrawlCard(
     vm: MainViewModel,
     needLegacyPermission: Boolean,
-    onRequestLegacyPermission: () -> Unit
+    onRequestLegacyPermission: () -> Unit,
+    needNotifyPermission: Boolean,
+    onRequestNotifyPermission: () -> Unit,
+    overlayGranted: Boolean,
+    onRequestOverlayPermission: () -> Unit
 ) {
     SectionCard(title = "4) 抓取与导出") {
         OutlinedTextField(
             value = vm.outputTitle,
-            onValueChange = { vm.outputTitle = it },
+            onValueChange = {
+                vm.outputTitle = it
+                vm.persistNow()
+            },
             label = { Text("输出标题（文件名）") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
         OutlinedTextField(
             value = vm.outputAuthor,
-            onValueChange = { vm.outputAuthor = it },
+            onValueChange = {
+                vm.outputAuthor = it
+                vm.persistNow()
+            },
             label = { Text("作者（可选）") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
@@ -371,14 +468,53 @@ private fun CrawlCard(
             selected = vm.speedMode,
             options = SpeedMode.entries,
             optionLabel = { it.label },
-            onSelected = { vm.speedMode = it }
+            onSelected = vm::setSpeedMode
         )
 
         Text(
-            "说明: 极速/快速会启用低并发加速并保留随机抖动；若频繁重试建议降到平衡模式。",
+            "说明: 下载中可直接切换速度，新的档位会在下一章生效；失败回填也支持同样的动态切换。",
             fontSize = 12.sp,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
         )
+
+        if (needNotifyPermission) {
+            Text(
+                "建议允许通知权限，抓取切到后台时也能看到实时进度。",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.primary
+            )
+            OutlinedButton(
+                onClick = onRequestNotifyPermission,
+                enabled = !vm.isBusy,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("授予通知权限")
+            }
+        } else {
+            Text(
+                "后台通知已可用，下载切后台仍可查看进度。",
+                fontSize = 12.sp
+            )
+        }
+
+        RowWithSwitch(
+            label = "开启悬浮进度窗",
+            checked = vm.enableOverlay,
+            onCheckedChange = { enabled ->
+                if (enabled && !overlayGranted) {
+                    onRequestOverlayPermission()
+                } else {
+                    vm.setOverlayEnabled(enabled)
+                }
+            }
+        )
+        if (vm.enableOverlay && !overlayGranted) {
+            Text(
+                "悬浮窗权限未开启，当前仅显示通知栏进度。",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
 
         if (needLegacyPermission) {
             Text(
@@ -420,6 +556,13 @@ private fun CrawlCard(
             modifier = Modifier.fillMaxWidth()
         ) {
             Text("仅重试失败章节并回填")
+        }
+        OutlinedButton(
+            onClick = vm::openLatestOutput,
+            enabled = !vm.isBusy,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("打开最新抓取文件")
         }
 
         if (vm.progressText.isNotBlank()) {
@@ -489,6 +632,51 @@ private fun LogCard(vm: MainViewModel) {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun SavedFilesCard(vm: MainViewModel) {
+    SectionCard(title = "6) 已抓取文件") {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(
+                onClick = vm::refreshSavedFiles,
+                enabled = !vm.isBusy,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("刷新文件列表")
+            }
+            OutlinedButton(
+                onClick = vm::openSelectedFile,
+                enabled = !vm.isBusy,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("打开选中文件（系统默认方式）")
+            }
+            OutlinedButton(
+                onClick = vm::convertSelectedTxtToEpub,
+                enabled = !vm.isBusy,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("将选中 TXT 转换为 EPUB")
+            }
+        }
+
+        SelectableListBox(
+            height = 180.dp,
+            itemCount = vm.savedFiles.size,
+            selectedIndex = vm.selectedSavedFileIndex,
+            onSelect = vm::chooseSavedFile,
+            itemText = { idx ->
+                val f = vm.savedFiles[idx]
+                val sizeKb = (f.sizeBytes / 1024.0).coerceAtLeast(0.1)
+                "${f.name}\n${"%.1f".format(sizeKb)} KB"
+            }
+        )
+        Text(
+            "提示: 文件列表来自应用目录 output，可直接点击打开；若导出到 Download 失败也可在这里找回。",
+            fontSize = 12.sp
+        )
     }
 }
 

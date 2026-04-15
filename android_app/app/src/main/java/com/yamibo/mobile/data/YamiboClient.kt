@@ -2,15 +2,13 @@
 
 import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
+import androidx.core.content.FileProvider
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import okhttp3.FormBody
 import okhttp3.JavaNetCookieJar
 import okhttp3.OkHttpClient
@@ -21,16 +19,18 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
+import java.io.ByteArrayOutputStream
 import java.net.CookieManager
 import java.net.CookiePolicy
 import java.net.HttpCookie
 import java.net.URI
 import java.net.URLEncoder
 import java.util.Locale
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.UUID
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.zip.CRC32
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import kotlin.math.roundToLong
 import kotlin.random.Random
 
@@ -349,99 +349,96 @@ class YamiboClient(
         previewCache: Map<Int, String>,
         allowLegacyDownloadWrite: Boolean,
         onProgress: (CrawlProgress) -> Unit,
-        onNotice: ((String) -> Unit)? = null
+        onNotice: ((String) -> Unit)? = null,
+        speedProvider: (() -> SpeedMode)? = null
     ): CrawlResult {
         val safeName = sanitizeFilename(outputTitle.ifBlank { "TITLE" })
         val fileName = "$safeName.txt"
-        val retryPolicy = retryPolicyForSpeed(speedMode)
-        val pidContentCache = ConcurrentHashMap<String, String>()
-        val failedTitlesQueue = ConcurrentLinkedQueue<String>()
-        val failedRecordQueue = ConcurrentLinkedQueue<FailedChapterRecord>()
+        val pidContentCache = mutableMapOf<String, String>()
+        val failedTitles = mutableListOf<String>()
+        val failedRecords = mutableListOf<FailedChapterRecord>()
         val startedAt = System.currentTimeMillis()
-        val cacheHitCount = AtomicInteger(0)
-        val doneCounter = AtomicInteger(0)
-        if (speedMode.maxConcurrency > 1) {
-            onNotice?.invoke("已启用并发抓取，最大并发 ${speedMode.maxConcurrency}。")
-        }
+        var cacheHitCount = 0
+        var doneCount = 0
+        var lastSpeed = speedMode
 
-        coroutineScope {
-            val semaphore = Semaphore(speedMode.maxConcurrency)
-            val jobs = chapters.mapIndexed { index, chapter ->
-                async {
-                    semaphore.withPermit {
-                        val pid = chapter.pid
-                        var usedNetwork = false
+        onNotice?.invoke("抓取进行中，速度档位可在下载过程中随时切换，下一章自动生效。")
 
-                        val previewContent = previewCache[index]
-                        val content = if (previewContent != null) {
-                            if (pid.isNotBlank()) {
-                                pidContentCache[pid] = previewContent
-                            }
-                            previewContent
-                        } else if (pid.isNotBlank() && pidContentCache.containsKey(pid)) {
-                            cacheHitCount.incrementAndGet()
-                            pidContentCache[pid].orEmpty()
-                        } else {
-                            usedNetwork = true
-                            fetchChapterContent(
-                                url = chapter.url,
-                                retryPolicy = retryPolicy,
-                                pidContentCache = pidContentCache
-                            ) { nextAttempt, maxAttempts, waitMs, reason ->
-                                onNotice?.invoke(
-                                    "《${chapter.title}》请求失败，准备重试 $nextAttempt/$maxAttempts，等待 ${"%.1f".format(waitMs / 1000.0)}s：$reason"
-                                )
-                            }
-                        }
+        chapters.forEachIndexed { index, chapter ->
+            val activeSpeed = speedProvider?.invoke() ?: speedMode
+            if (activeSpeed != lastSpeed) {
+                onNotice?.invoke("速度已切换：${lastSpeed.label} -> ${activeSpeed.label}（从下一章生效）")
+                lastSpeed = activeSpeed
+            }
 
-                        val finalContent = if (content.startsWith("【最终失败")) {
-                            val marker = "$FAILED_MARKER_PREFIX${index + 1}#"
-                            failedTitlesQueue.add(chapter.title)
-                            failedRecordQueue.add(
-                                FailedChapterRecord(
-                                    index = index,
-                                    title = chapter.title,
-                                    url = chapter.url,
-                                    marker = marker
-                                )
-                            )
-                            marker
-                        } else {
-                            content
-                        }
-                        chapter.content = finalContent
+            val pid = chapter.pid
+            var usedNetwork = false
 
-                        val done = doneCounter.incrementAndGet()
-                        val elapsedSeconds = (System.currentTimeMillis() - startedAt) / 1000.0
-                        val eta = if (done <= 0) 0L else {
-                            ((elapsedSeconds / done) * (chapters.size - done)).roundToLong().coerceAtLeast(0)
-                        }
-
-                        onProgress(
-                            CrawlProgress(
-                                done = done,
-                                total = chapters.size,
-                                currentTitle = chapter.title,
-                                etaSeconds = eta
-                            )
-                        )
-
-                        if (done < chapters.size) {
-                            val sleepMs = if (usedNetwork) {
-                                Random.nextLong(speedMode.delayMinMs, speedMode.delayMaxMs + 1)
-                            } else {
-                                Random.nextLong(30L, 90L)
-                            }
-                            delay(sleepMs)
-                        }
-                    }
+            val previewContent = previewCache[index]
+            val content = if (previewContent != null) {
+                if (pid.isNotBlank()) {
+                    pidContentCache[pid] = previewContent
+                }
+                previewContent
+            } else if (pid.isNotBlank() && pidContentCache.containsKey(pid)) {
+                cacheHitCount += 1
+                pidContentCache[pid].orEmpty()
+            } else {
+                usedNetwork = true
+                fetchChapterContent(
+                    url = chapter.url,
+                    retryPolicy = retryPolicyForSpeed(activeSpeed),
+                    pidContentCache = pidContentCache
+                ) { nextAttempt, maxAttempts, waitMs, reason ->
+                    onNotice?.invoke(
+                        "《${chapter.title}》请求失败，准备重试 $nextAttempt/$maxAttempts，等待 ${"%.1f".format(waitMs / 1000.0)}s：$reason"
+                    )
                 }
             }
-            jobs.awaitAll()
+
+            val finalContent = if (content.startsWith("【最终失败")) {
+                val marker = "$FAILED_MARKER_PREFIX${index + 1}#"
+                failedTitles += chapter.title
+                failedRecords += FailedChapterRecord(
+                    index = index,
+                    title = chapter.title,
+                    url = chapter.url,
+                    marker = marker
+                )
+                marker
+            } else {
+                content
+            }
+            chapter.content = finalContent
+
+            doneCount += 1
+            val elapsedSeconds = (System.currentTimeMillis() - startedAt) / 1000.0
+            val eta = if (doneCount <= 0) 0L else {
+                ((elapsedSeconds / doneCount) * (chapters.size - doneCount)).roundToLong().coerceAtLeast(0)
+            }
+
+            onProgress(
+                CrawlProgress(
+                    done = doneCount,
+                    total = chapters.size,
+                    currentTitle = chapter.title,
+                    etaSeconds = eta
+                )
+            )
+
+            if (doneCount < chapters.size) {
+                val nextSpeed = speedProvider?.invoke() ?: speedMode
+                val sleepMs = if (usedNetwork) {
+                    Random.nextLong(nextSpeed.delayMinMs, nextSpeed.delayMaxMs + 1)
+                } else {
+                    Random.nextLong(40L, 120L)
+                }
+                delay(sleepMs)
+            }
         }
 
-        if (cacheHitCount.get() > 0) {
-            onNotice?.invoke("目录页缓存命中 ${cacheHitCount.get()} 章，已减少重复请求。")
+        if (cacheHitCount > 0) {
+            onNotice?.invoke("目录页缓存命中 $cacheHitCount 章，已减少重复请求。")
         }
 
         val text = buildString {
@@ -453,11 +450,11 @@ class YamiboClient(
         }
         val localWorking = saveToAppPrivateOutput(fileName, text)
 
-        val failedRecordsPath = if (failedRecordQueue.isNotEmpty()) {
+        val failedRecordsPath = if (failedRecords.isNotEmpty()) {
             val failedFileName = "${safeName}.failed_chapters.json"
             val failedFile = saveFailedRecordsToAppPrivate(
                 fileName = failedFileName,
-                records = failedRecordQueue.toList().sortedBy { it.index }
+                records = failedRecords.sortedBy { it.index }
             )
             failedFile.absolutePath
         } else {
@@ -479,8 +476,8 @@ class YamiboClient(
             failedRecordsPath = failedRecordsPath,
             localFallbackPath = saveTarget.localFallbackPath,
             chapterCount = chapters.size,
-            failedCount = failedTitlesQueue.size,
-            failedTitles = failedTitlesQueue.toList()
+            failedCount = failedTitles.size,
+            failedTitles = failedTitles
         )
     }
 
@@ -488,7 +485,8 @@ class YamiboClient(
         localWorkingPath: String,
         failedRecordsPath: String,
         speedMode: SpeedMode,
-        onNotice: ((String) -> Unit)? = null
+        onNotice: ((String) -> Unit)? = null,
+        speedProvider: (() -> SpeedMode)? = null
     ): RetryFillResult {
         val txtFile = File(localWorkingPath)
         if (!txtFile.exists()) {
@@ -512,16 +510,21 @@ class YamiboClient(
         }
 
         var txtContent = txtFile.readText(Charsets.UTF_8)
-        val retryPolicy = retryPolicyForSpeed(speedMode)
-        val pidCache = ConcurrentHashMap<String, String>()
+        val pidCache = mutableMapOf<String, String>()
         val remaining = mutableListOf<FailedChapterRecord>()
         var successCount = 0
+        var lastSpeed = speedMode
 
         records.forEachIndexed { idx, record ->
+            val activeSpeed = speedProvider?.invoke() ?: speedMode
+            if (activeSpeed != lastSpeed) {
+                onNotice?.invoke("回填速度已切换：${lastSpeed.label} -> ${activeSpeed.label}（下一章生效）")
+                lastSpeed = activeSpeed
+            }
             onNotice?.invoke("重试失败章节 ${idx + 1}/${records.size}: ${record.title}")
             val content = fetchChapterContent(
                 url = record.url,
-                retryPolicy = retryPolicy,
+                retryPolicy = retryPolicyForSpeed(activeSpeed),
                 pidContentCache = pidCache
             ) { nextAttempt, maxAttempts, waitMs, reason ->
                 onNotice?.invoke(
@@ -540,6 +543,11 @@ class YamiboClient(
             }
             txtContent = txtContent.replace(record.marker, content)
             successCount += 1
+
+            if (idx < records.lastIndex) {
+                val nextSpeed = speedProvider?.invoke() ?: speedMode
+                delay(Random.nextLong(nextSpeed.delayMinMs, nextSpeed.delayMaxMs + 1))
+            }
         }
 
         txtFile.writeText(txtContent, Charsets.UTF_8)
@@ -581,8 +589,272 @@ class YamiboClient(
         )
         return ExportResult(
             savedToDownloads = saveTarget.savedToDownloads,
-            displayPath = saveTarget.displayPath
+            displayPath = saveTarget.displayPath,
+            absolutePath = saveTarget.absolutePath,
+            localFallbackPath = saveTarget.localFallbackPath
         )
+    }
+
+    fun convertTxtToEpub(
+        sourcePath: String,
+        outputTitle: String,
+        outputAuthor: String,
+        allowLegacyDownloadWrite: Boolean
+    ): ExportResult {
+        val source = File(sourcePath)
+        if (!source.exists() || !source.isFile || source.extension.lowercase(Locale.ROOT) != "txt") {
+            throw IllegalStateException("请选择可用的 TXT 文件进行转换")
+        }
+
+        val txt = source.readText(Charsets.UTF_8)
+        val chapters = parseChaptersFromTxt(txt)
+        if (chapters.isEmpty()) {
+            throw IllegalStateException("TXT 未解析到章节，无法转换 EPUB")
+        }
+
+        val baseName = sanitizeFilename(outputTitle.ifBlank { source.nameWithoutExtension.ifBlank { "TITLE" } })
+        val fileName = "$baseName.epub"
+        val author = outputAuthor.ifBlank { "UNKNOWN" }
+        val epubBytes = buildEpubBytes(
+            title = baseName,
+            author = author,
+            chapters = chapters
+        )
+
+        // 始终保留一份应用目录副本，便于在 App 内历史列表直接打开。
+        val localCopy = saveToAppPrivateOutputBytes(fileName, epubBytes)
+        val saveTarget = writeBytesToPreferredLocation(
+            fileName = fileName,
+            bytes = epubBytes,
+            mimeType = "application/epub+zip",
+            allowLegacyDownloadWrite = allowLegacyDownloadWrite
+        )
+
+        return ExportResult(
+            savedToDownloads = saveTarget.savedToDownloads,
+            displayPath = saveTarget.displayPath,
+            absolutePath = saveTarget.absolutePath,
+            localFallbackPath = localCopy.absolutePath
+        )
+    }
+
+    fun listSavedOutputFiles(): List<SavedOutputFile> {
+        val dir = appOutputDir()
+        val files = dir.listFiles()?.toList().orEmpty()
+        return files
+            .filter { it.isFile }
+            .filter { file ->
+                val ext = file.extension.lowercase(Locale.ROOT)
+                ext == "txt" || ext == "epub"
+            }
+            .sortedByDescending { it.lastModified() }
+            .map { file ->
+                SavedOutputFile(
+                    name = file.name,
+                    absolutePath = file.absolutePath,
+                    modifiedAt = file.lastModified(),
+                    sizeBytes = file.length()
+                )
+            }
+    }
+
+    fun openFileWithSystem(path: String): Boolean {
+        val uri = if (path.startsWith("content://")) {
+            Uri.parse(path)
+        } else {
+            val file = File(path)
+            if (!file.exists()) {
+                return false
+            }
+            FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+        }
+
+        val mimeType = when {
+            path.lowercase(Locale.ROOT).endsWith(".epub") -> "application/epub+zip"
+            path.lowercase(Locale.ROOT).endsWith(".txt") -> "text/plain"
+            else -> "*/*"
+        }
+
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, mimeType)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+
+        return runCatching {
+            context.startActivity(intent)
+            true
+        }.getOrDefault(false)
+    }
+
+    private fun parseChaptersFromTxt(text: String): List<Pair<String, String>> {
+        val normalized = text.replace("\r\n", "\n")
+        val regex = Regex(
+            pattern = "(?ms)^====\\s*(.*?)\\s*====\\s*\\n\\n(.*?)(?=^====\\s*.*?\\s*====\\s*\\n\\n|\\z)"
+        )
+        val matches = regex.findAll(normalized).toList()
+        if (matches.isEmpty()) {
+            return emptyList()
+        }
+        return matches.map { match ->
+            val title = match.groupValues.getOrNull(1).orEmpty().trim().ifBlank { "章节" }
+            val content = match.groupValues.getOrNull(2).orEmpty().trim()
+            title to content
+        }
+    }
+
+    private fun buildEpubBytes(
+        title: String,
+        author: String,
+        chapters: List<Pair<String, String>>
+    ): ByteArray {
+        val safeTitle = xmlEscape(title.ifBlank { "TITLE" })
+        val safeAuthor = xmlEscape(author.ifBlank { "UNKNOWN" })
+        val bookId = "urn:uuid:${UUID.randomUUID()}"
+
+        val navItems = chapters.mapIndexed { idx, pair ->
+            "<li><a href=\"chapter_${(idx + 1).toString().padStart(4, '0')}.xhtml\">${xmlEscape(pair.first)}</a></li>"
+        }.joinToString("\n")
+
+        val manifestItems = chapters.mapIndexed { idx, _ ->
+            "<item id=\"chap${idx + 1}\" href=\"chapter_${(idx + 1).toString().padStart(4, '0')}.xhtml\" media-type=\"application/xhtml+xml\"/>"
+        }.joinToString("\n")
+
+        val spineItems = chapters.mapIndexed { idx, _ ->
+            "<itemref idref=\"chap${idx + 1}\"/>"
+        }.joinToString("\n")
+
+        val ncxItems = chapters.mapIndexed { idx, pair ->
+            "<navPoint id=\"navPoint-${idx + 1}\" playOrder=\"${idx + 1}\"><navLabel><text>${xmlEscape(pair.first)}</text></navLabel><content src=\"chapter_${(idx + 1).toString().padStart(4, '0')}.xhtml\"/></navPoint>"
+        }.joinToString("\n")
+
+        val containerXml = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+              <rootfiles>
+                <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+              </rootfiles>
+            </container>
+        """.trimIndent()
+
+        val opf = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <package xmlns="http://www.idpf.org/2007/opf" unique-identifier="BookId" version="2.0">
+              <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+                <dc:identifier id="BookId">$bookId</dc:identifier>
+                <dc:title>$safeTitle</dc:title>
+                <dc:creator>$safeAuthor</dc:creator>
+                <dc:language>zh-CN</dc:language>
+              </metadata>
+              <manifest>
+                <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+                <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml"/>
+                $manifestItems
+              </manifest>
+              <spine toc="ncx">
+                $spineItems
+              </spine>
+            </package>
+        """.trimIndent()
+
+        val navXhtml = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <html xmlns="http://www.w3.org/1999/xhtml">
+              <head><title>目录</title></head>
+              <body>
+                <h1>目录</h1>
+                <ol>
+                  $navItems
+                </ol>
+              </body>
+            </html>
+        """.trimIndent()
+
+        val tocNcx = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+              <head>
+                <meta name="dtb:uid" content="$bookId"/>
+              </head>
+              <docTitle><text>$safeTitle</text></docTitle>
+              <navMap>
+                $ncxItems
+              </navMap>
+            </ncx>
+        """.trimIndent()
+
+        val out = ByteArrayOutputStream()
+        ZipOutputStream(out).use { zip ->
+            val mimetypeBytes = "application/epub+zip".toByteArray(Charsets.US_ASCII)
+            val crc = CRC32().apply { update(mimetypeBytes) }.value
+            val mimeEntry = ZipEntry("mimetype").apply {
+                method = ZipEntry.STORED
+                size = mimetypeBytes.size.toLong()
+                compressedSize = mimetypeBytes.size.toLong()
+                this.crc = crc
+            }
+            zip.putNextEntry(mimeEntry)
+            zip.write(mimetypeBytes)
+            zip.closeEntry()
+
+            addZipText(zip, "META-INF/container.xml", containerXml)
+            addZipText(zip, "OEBPS/content.opf", opf)
+            addZipText(zip, "OEBPS/nav.xhtml", navXhtml)
+            addZipText(zip, "OEBPS/toc.ncx", tocNcx)
+
+            chapters.forEachIndexed { idx, pair ->
+                val chapterName = "OEBPS/chapter_${(idx + 1).toString().padStart(4, '0')}.xhtml"
+                val chapterBody = pair.second
+                    .trim()
+                    .split("\n")
+                    .joinToString("\n") { line ->
+                        val safeLine = xmlEscape(line.trim())
+                        if (safeLine.isBlank()) "<p></p>" else "<p>$safeLine</p>"
+                    }
+                val chapterXhtml = """
+                    <?xml version="1.0" encoding="UTF-8"?>
+                    <html xmlns="http://www.w3.org/1999/xhtml">
+                      <head><title>${xmlEscape(pair.first)}</title></head>
+                      <body>
+                        <h2>${xmlEscape(pair.first)}</h2>
+                        $chapterBody
+                      </body>
+                    </html>
+                """.trimIndent()
+                addZipText(zip, chapterName, chapterXhtml)
+            }
+        }
+        return out.toByteArray()
+    }
+
+    private fun addZipText(zip: ZipOutputStream, path: String, text: String) {
+        val entry = ZipEntry(path)
+        zip.putNextEntry(entry)
+        zip.write(text.toByteArray(Charsets.UTF_8))
+        zip.closeEntry()
+    }
+
+    private fun xmlEscape(value: String): String {
+        return value
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\"", "&quot;")
+            .replace("'", "&apos;")
+    }
+
+    private fun writeBytesToPreferredLocation(
+        fileName: String,
+        bytes: ByteArray,
+        mimeType: String,
+        allowLegacyDownloadWrite: Boolean
+    ): SaveTarget {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            saveToDownloadsByMediaStore(fileName, bytes, mimeType)?.let { return it }
+        } else if (allowLegacyDownloadWrite) {
+            saveToLegacyDownloadDir(fileName, bytes)?.let { return it }
+        }
+        return saveToAppPrivateOutputBytes(fileName, bytes)
     }
 
     private fun writeTextToPreferredLocation(
@@ -590,27 +862,31 @@ class YamiboClient(
         text: String,
         allowLegacyDownloadWrite: Boolean
     ): SaveTarget {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            saveToDownloadsByMediaStore(fileName, text)?.let { return it }
-        } else if (allowLegacyDownloadWrite) {
-            saveToLegacyDownloadDir(fileName, text)?.let { return it }
-        }
-        return saveToAppPrivateOutput(fileName, text)
+        return writeBytesToPreferredLocation(
+            fileName = fileName,
+            bytes = text.toByteArray(Charsets.UTF_8),
+            mimeType = "text/plain",
+            allowLegacyDownloadWrite = allowLegacyDownloadWrite
+        )
     }
 
-    private fun saveToDownloadsByMediaStore(fileName: String, text: String): SaveTarget? {
+    private fun saveToDownloadsByMediaStore(
+        fileName: String,
+        bytes: ByteArray,
+        mimeType: String
+    ): SaveTarget? {
         return try {
             val resolver = context.contentResolver
             val values = ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, fileName)
-                put(MediaStore.Downloads.MIME_TYPE, "text/plain")
+                put(MediaStore.Downloads.MIME_TYPE, mimeType)
                 put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
                 put(MediaStore.Downloads.IS_PENDING, 1)
             }
             val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return null
 
             resolver.openOutputStream(uri)?.use { output ->
-                output.write(text.toByteArray(Charsets.UTF_8))
+                output.write(bytes)
                 output.flush()
             } ?: return null
 
@@ -630,14 +906,14 @@ class YamiboClient(
     }
 
     @Suppress("DEPRECATION")
-    private fun saveToLegacyDownloadDir(fileName: String, text: String): SaveTarget? {
+    private fun saveToLegacyDownloadDir(fileName: String, bytes: ByteArray): SaveTarget? {
         return try {
             val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
             if (!downloadsDir.exists()) {
                 downloadsDir.mkdirs()
             }
             val output = File(downloadsDir, fileName)
-            output.writeText(text, Charsets.UTF_8)
+            output.writeBytes(bytes)
             SaveTarget(
                 absolutePath = output.absolutePath,
                 displayPath = output.absolutePath,
@@ -650,9 +926,13 @@ class YamiboClient(
     }
 
     private fun saveToAppPrivateOutput(fileName: String, text: String): SaveTarget {
+        return saveToAppPrivateOutputBytes(fileName, text.toByteArray(Charsets.UTF_8))
+    }
+
+    private fun saveToAppPrivateOutputBytes(fileName: String, bytes: ByteArray): SaveTarget {
         val outputDir = appOutputDir()
         val output = File(outputDir, fileName)
-        output.writeText(text, Charsets.UTF_8)
+        output.writeBytes(bytes)
         return SaveTarget(
             absolutePath = output.absolutePath,
             displayPath = output.absolutePath,

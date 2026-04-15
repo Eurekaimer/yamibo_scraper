@@ -93,7 +93,16 @@ data class CrawlResult(
 
 data class ExportResult(
     val savedToDownloads: Boolean,
-    val displayPath: String
+    val displayPath: String,
+    val absolutePath: String,
+    val localFallbackPath: String?
+)
+
+data class SavedOutputFile(
+    val name: String,
+    val absolutePath: String,
+    val modifiedAt: Long,
+    val sizeBytes: Long
 )
 
 data class FailedChapterRecord(
