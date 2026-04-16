@@ -76,6 +76,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var lastProgressUpdateMs: Long = 0L
     private var lastNoticeUpdateMs: Long = 0L
     private var lastNoticeText: String = ""
+    private var lastSuggestedTitle: String = ""
+    private var lastSuggestedAuthor: String = ""
 
     init {
         restorePrefs()
@@ -126,6 +128,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         previewCountText = prefs.getString(KEY_PREVIEW_COUNT, "2").orEmpty().ifBlank { "2" }
         outputTitle = prefs.getString(KEY_OUTPUT_TITLE, "").orEmpty()
         outputAuthor = prefs.getString(KEY_OUTPUT_AUTHOR, "").orEmpty()
+        lastSuggestedTitle = outputTitle
+        lastSuggestedAuthor = outputAuthor
         enableOverlay = prefs.getBoolean(KEY_ENABLE_OVERLAY, false)
     }
 
@@ -303,15 +307,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                 if (selectedSearchIndex >= 0) {
                     val selected = results[selectedSearchIndex]
-                    if (outputTitle.isBlank() || outputAuthor.isBlank()) {
-                        val (title, author) = c.suggestMetaFromThreadTitle(selected.title)
-                        if (outputTitle.isBlank()) {
-                            outputTitle = title
-                        }
-                        if (outputAuthor.isBlank()) {
-                            outputAuthor = author
-                        }
-                    }
+                    applySuggestedOutputMeta(c, selected.title, forceReplace = false)
                 }
 
                 appendLog("搜索完成，共 ${results.size} 条")
@@ -728,6 +724,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun chooseSearchResult(index: Int) {
         selectedSearchIndex = max(-1, index)
         previewConfirmed = false
+        val selectedThread = searchResults.getOrNull(selectedSearchIndex) ?: return
+        runCatching {
+            applySuggestedOutputMeta(ensureClient(forceReset = false), selectedThread.title, forceReplace = false)
+        }
+        persistNow()
     }
 
     fun chooseCatalogCandidate(index: Int) {
@@ -735,6 +736,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         previewItems = emptyList()
         previewCache = emptyMap()
         previewConfirmed = false
+    }
+
+    fun refreshSuggestedOutputMeta(forceReplace: Boolean = true) {
+        val selectedThread = searchResults.getOrNull(selectedSearchIndex)
+        if (selectedThread == null) {
+            appendLog("请先在搜索结果中选择一个帖子")
+            return
+        }
+        applySuggestedOutputMeta(
+            client = ensureClient(forceReset = false),
+            threadTitle = selectedThread.title,
+            forceReplace = forceReplace
+        )
+        appendLog("已按当前帖子重新推荐标题与作者")
+        persistNow()
     }
 
     private fun parseAuthMode(raw: String?): AuthMode {
@@ -766,5 +782,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val KEY_ENABLE_OVERLAY = "enable_overlay"
         private const val DEFAULT_UA =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    }
+
+    private fun applySuggestedOutputMeta(
+        client: YamiboClient,
+        threadTitle: String,
+        forceReplace: Boolean
+    ) {
+        val (suggestedTitle, suggestedAuthor) = client.suggestMetaFromThreadTitle(threadTitle)
+
+        val shouldUpdateTitle = forceReplace ||
+            outputTitle.isBlank() ||
+            outputTitle == lastSuggestedTitle
+        val shouldUpdateAuthor = forceReplace ||
+            outputAuthor.isBlank() ||
+            outputAuthor == lastSuggestedAuthor
+
+        if (shouldUpdateTitle) {
+            outputTitle = suggestedTitle
+        }
+        if (shouldUpdateAuthor) {
+            outputAuthor = suggestedAuthor
+        }
+
+        lastSuggestedTitle = suggestedTitle
+        lastSuggestedAuthor = suggestedAuthor
     }
 }

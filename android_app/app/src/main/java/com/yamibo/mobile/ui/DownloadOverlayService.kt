@@ -12,7 +12,6 @@ import android.graphics.PixelFormat
 import android.os.Build
 import android.os.IBinder
 import android.provider.Settings
-import android.util.Log
 import android.view.Gravity
 import android.view.WindowManager
 import android.widget.LinearLayout
@@ -34,52 +33,45 @@ class DownloadOverlayService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        return try {
-            ensureChannel()
+        ensureChannel()
 
-            when (intent?.action) {
-                ACTION_START -> {
-                    overlayEnabled = intent.getBooleanExtra(EXTRA_OVERLAY_ENABLED, false)
-                    val title = intent.getStringExtra(EXTRA_TITLE) ?: "后台下载进行中"
-                    val done = intent.getIntExtra(EXTRA_DONE, 0)
-                    val total = intent.getIntExtra(EXTRA_TOTAL, 100)
-                    val eta = intent.getStringExtra(EXTRA_ETA) ?: "--:--"
+        when (intent?.action) {
+            ACTION_START -> {
+                overlayEnabled = intent.getBooleanExtra(EXTRA_OVERLAY_ENABLED, false)
+                val title = intent.getStringExtra(EXTRA_TITLE) ?: "后台下载进行中"
+                val done = intent.getIntExtra(EXTRA_DONE, 0)
+                val total = intent.getIntExtra(EXTRA_TOTAL, 100)
+                val eta = intent.getStringExtra(EXTRA_ETA) ?: "--:--"
 
-                    startForeground(notifyId, buildNotification(title, done, total, eta))
-                    if (overlayEnabled) {
-                        ensureOverlay()
-                        updateOverlay(title, done, total, eta)
-                    }
-                }
-
-                ACTION_UPDATE -> {
-                    val title = intent.getStringExtra(EXTRA_TITLE) ?: "后台下载进行中"
-                    val done = intent.getIntExtra(EXTRA_DONE, 0)
-                    val total = intent.getIntExtra(EXTRA_TOTAL, 100)
-                    val eta = intent.getStringExtra(EXTRA_ETA) ?: "--:--"
-
-                    startForeground(notifyId, buildNotification(title, done, total, eta))
-                    if (overlayEnabled) {
-                        ensureOverlay()
-                        updateOverlay(title, done, total, eta)
-                    }
-                }
-
-                ACTION_STOP -> {
-                    removeOverlay()
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                    stopSelf()
+                startForeground(notifyId, buildNotification(title, done, total, eta))
+                if (overlayEnabled) {
+                    ensureOverlay()
+                    updateOverlay(title, done, total, eta)
                 }
             }
 
-            START_NOT_STICKY
-        } catch (e: Exception) {
-            Log.e(TAG, "DownloadOverlayService onStartCommand failed", e)
-            removeOverlay()
-            runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
-            stopSelf()
-            START_NOT_STICKY
+            ACTION_UPDATE -> {
+                val title = intent.getStringExtra(EXTRA_TITLE) ?: "后台下载进行中"
+                val done = intent.getIntExtra(EXTRA_DONE, 0)
+                val total = intent.getIntExtra(EXTRA_TOTAL, 100)
+                val eta = intent.getStringExtra(EXTRA_ETA) ?: "--:--"
+
+                val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                manager.notify(notifyId, buildNotification(title, done, total, eta))
+                if (overlayEnabled) {
+                    ensureOverlay()
+                    updateOverlay(title, done, total, eta)
+                }
+            }
+
+            ACTION_STOP -> {
+                removeOverlay()
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
         }
+
+        return START_NOT_STICKY
     }
 
     override fun onDestroy() {
@@ -182,16 +174,11 @@ class DownloadOverlayService : Service() {
             y = 120
         }
 
-        runCatching {
-            windowManager?.addView(root, lp)
-        }.onSuccess {
-            overlayRoot = root
-            overlayTitle = titleView
-            overlayProgress = progressView
-            overlayProgressText = progressTextView
-        }.onFailure { e ->
-            Log.e(TAG, "Failed to attach download overlay window", e)
-        }
+        windowManager?.addView(root, lp)
+        overlayRoot = root
+        overlayTitle = titleView
+        overlayProgress = progressView
+        overlayProgressText = progressTextView
     }
 
     private fun updateOverlay(title: String, done: Int, total: Int, eta: String) {
@@ -224,7 +211,6 @@ class DownloadOverlayService : Service() {
         private const val EXTRA_TOTAL = "extra_total"
         private const val EXTRA_ETA = "extra_eta"
         private const val EXTRA_OVERLAY_ENABLED = "extra_overlay_enabled"
-        private const val TAG = "DownloadOverlayService"
 
         fun start(context: Context, title: String, overlayEnabled: Boolean) {
             val intent = Intent(context, DownloadOverlayService::class.java).apply {
@@ -235,14 +221,10 @@ class DownloadOverlayService : Service() {
                 putExtra(EXTRA_ETA, "--:--")
                 putExtra(EXTRA_OVERLAY_ENABLED, overlayEnabled)
             }
-            runCatching {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    context.startForegroundService(intent)
-                } else {
-                    context.startService(intent)
-                }
-            }.onFailure { e ->
-                Log.e(TAG, "Failed to start foreground download service", e)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
             }
         }
 
@@ -254,14 +236,10 @@ class DownloadOverlayService : Service() {
                 putExtra(EXTRA_TOTAL, total)
                 putExtra(EXTRA_ETA, eta)
             }
-            runCatching {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    context.startForegroundService(intent)
-                } else {
-                    context.startService(intent)
-                }
-            }.onFailure { e ->
-                Log.e(TAG, "Failed to send progress update to service", e)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
             }
         }
 
@@ -269,11 +247,7 @@ class DownloadOverlayService : Service() {
             val intent = Intent(context, DownloadOverlayService::class.java).apply {
                 action = ACTION_STOP
             }
-            runCatching {
-                context.startService(intent)
-            }.onFailure { e ->
-                Log.e(TAG, "Failed to stop foreground download service", e)
-            }
+            context.startService(intent)
         }
     }
 }

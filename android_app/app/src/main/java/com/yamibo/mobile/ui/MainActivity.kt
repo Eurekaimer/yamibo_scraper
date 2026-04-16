@@ -463,6 +463,13 @@ private fun CrawlCard(
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
+        OutlinedButton(
+            onClick = { vm.refreshSuggestedOutputMeta(forceReplace = true) },
+            enabled = !vm.isBusy,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("按当前帖子重新推荐标题/作者")
+        }
 
         EnumDropdown(
             label = "速度档位",

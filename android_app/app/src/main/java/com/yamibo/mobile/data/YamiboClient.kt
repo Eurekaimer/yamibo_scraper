@@ -675,14 +675,55 @@ class YamiboClient(
             else -> "*/*"
         }
 
-        val intent = Intent(Intent.ACTION_VIEW).apply {
+        val packageManager = context.packageManager
+        val viewIntent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, mimeType)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
 
+        val candidateIntents = mutableListOf<Intent>()
+        if (viewIntent.resolveActivity(packageManager) != null) {
+            candidateIntents += viewIntent
+        }
+
+        if (mimeType == "text/plain") {
+            val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                type = mimeType
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            if (sendIntent.resolveActivity(packageManager) != null) {
+                candidateIntents += sendIntent
+            }
+        }
+
+        if (candidateIntents.isEmpty()) {
+            return false
+        }
+
+        candidateIntents.forEach { intent ->
+            packageManager.queryIntentActivities(intent, 0).forEach { resolveInfo ->
+                context.grantUriPermission(
+                    resolveInfo.activityInfo.packageName,
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
+        }
+
+        val primaryIntent = candidateIntents.first()
+        val chooser = Intent.createChooser(primaryIntent, "打开文件").apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            if (candidateIntents.size > 1) {
+                putExtra(Intent.EXTRA_INITIAL_INTENTS, candidateIntents.drop(1).toTypedArray())
+            }
+        }
+
         return runCatching {
-            context.startActivity(intent)
+            context.startActivity(chooser)
             true
         }.getOrDefault(false)
     }
