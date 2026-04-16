@@ -47,7 +47,7 @@ uv run python yamibo_scraper.py
 
 界面预览：
 
-![2026-04-16-15-54-14](https://cdn.jsdelivr.net/gh/Eurekaimer/MyIMGs@main/img/2026-04-16-15-54-14)
+![](https://raw.githubusercontent.com/Eurekaimer/MyIMGs/main/img/20260416160030019.png)
 
 ## Android 端
 
