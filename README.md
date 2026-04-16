@@ -45,6 +45,10 @@ uv run python yamibo_scraper.py
 - 配置文件：`yamibo_config.json`
 - 输出目录：`output/`
 
+界面预览：
+
+![2026-04-16-15-54-14](https://cdn.jsdelivr.net/gh/Eurekaimer/MyIMGs@main/img/2026-04-16-15-54-14)
+
 ## Android 端
 
 Android 子项目位于 `android_app/`，整体流程尽量与桌面端保持一致：登录、搜索、提取目录、预览、抓取、导出、失败回填。
