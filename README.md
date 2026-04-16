@@ -61,6 +61,10 @@ Android 端输出：
 - 打开文件时会调用系统选择器；如果默认打开不稳定，建议手动选浏览器、文本阅读器或 EPUB 阅读器
 - Android 端支持已抓取 TXT 转 EPUB，并会在抓取与转换时自动执行繁体转简体
 
+界面预览：
+
+![20260416151939](https://cdn.jsdelivr.net/gh/Eurekaimer/MyIMGs@main/img/20260416151939.png)
+
 ## 项目结构
 
 - `gui_app.py`：桌面 GUI
