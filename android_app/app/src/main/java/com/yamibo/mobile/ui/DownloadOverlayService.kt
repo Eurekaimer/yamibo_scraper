@@ -212,7 +212,7 @@ class DownloadOverlayService : Service() {
         private const val EXTRA_ETA = "extra_eta"
         private const val EXTRA_OVERLAY_ENABLED = "extra_overlay_enabled"
 
-        fun start(context: Context, title: String, overlayEnabled: Boolean) {
+        fun start(context: Context, title: String, overlayEnabled: Boolean): Boolean {
             val intent = Intent(context, DownloadOverlayService::class.java).apply {
                 action = ACTION_START
                 putExtra(EXTRA_TITLE, title)
@@ -221,14 +221,17 @@ class DownloadOverlayService : Service() {
                 putExtra(EXTRA_ETA, "--:--")
                 putExtra(EXTRA_OVERLAY_ENABLED, overlayEnabled)
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
-            }
+            return runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+                true
+            }.getOrDefault(false)
         }
 
-        fun update(context: Context, title: String, done: Int, total: Int, eta: String) {
+        fun update(context: Context, title: String, done: Int, total: Int, eta: String): Boolean {
             val intent = Intent(context, DownloadOverlayService::class.java).apply {
                 action = ACTION_UPDATE
                 putExtra(EXTRA_TITLE, title)
@@ -236,18 +239,28 @@ class DownloadOverlayService : Service() {
                 putExtra(EXTRA_TOTAL, total)
                 putExtra(EXTRA_ETA, eta)
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
-            }
+            return runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+                true
+            }.getOrDefault(false)
         }
 
-        fun stop(context: Context) {
+        fun stop(context: Context): Boolean {
             val intent = Intent(context, DownloadOverlayService::class.java).apply {
                 action = ACTION_STOP
             }
-            context.startService(intent)
+            return runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+                true
+            }.getOrDefault(false)
         }
     }
 }

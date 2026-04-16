@@ -441,8 +441,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
 
                 appendLog("开始抓取，共 ${chapters.size} 章，当前速度：${speedMode.label}")
-                DownloadOverlayService.start(app, "准备抓取：$title", enableOverlay)
-                overlayStarted = true
+                overlayStarted = DownloadOverlayService.start(app, "准备抓取：$title", enableOverlay)
+                if (!overlayStarted) {
+                    appendLog("后台进度服务启动失败，已改为仅在页面内显示进度。")
+                }
 
                 val result = withContext(Dispatchers.IO) {
                     c.crawlChaptersToTxt(
@@ -458,13 +460,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 lastProgressUpdateMs = now
                                 val etaText = c.formatEta(p.etaSeconds)
                                 val line = "[${p.done}/${p.total}] ${p.currentTitle} | 预计剩余时间: $etaText"
-                                DownloadOverlayService.update(
-                                    app,
-                                    p.currentTitle,
-                                    p.done,
-                                    p.total,
-                                    etaText
-                                )
+                                if (overlayStarted) {
+                                    DownloadOverlayService.update(
+                                        app,
+                                        p.currentTitle,
+                                        p.done,
+                                        p.total,
+                                        etaText
+                                    )
+                                }
                                 viewModelScope.launch(Dispatchers.Main) {
                                     progressText = line
                                 }

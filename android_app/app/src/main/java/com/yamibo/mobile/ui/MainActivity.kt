@@ -221,8 +221,8 @@ private fun YamiboMobileApp(vm: MainViewModel = viewModel()) {
                         overlayGranted = overlayGranted,
                         onRequestOverlayPermission = requestOverlayPermission
                     )
-                    LogCard(vm)
                     SavedFilesCard(vm)
+                    LogCard(vm)
                 }
             }
         }
@@ -231,7 +231,7 @@ private fun YamiboMobileApp(vm: MainViewModel = viewModel()) {
 
 @Composable
 private fun SessionCard(vm: MainViewModel) {
-    SectionCard(title = "1) 登录与会话") {
+    SectionCard(title = "登录与会话") {
         LabeledChips(
             label = "登录方式",
             options = AuthMode.entries,
@@ -324,7 +324,7 @@ private fun SessionCard(vm: MainViewModel) {
 
 @Composable
 private fun SearchCard(vm: MainViewModel) {
-    SectionCard(title = "2) 搜索帖子") {
+    SectionCard(title = "搜索帖子") {
         OutlinedTextField(
             value = vm.keyword,
             onValueChange = { vm.keyword = it },
@@ -365,7 +365,7 @@ private fun SearchCard(vm: MainViewModel) {
 
 @Composable
 private fun CatalogCard(vm: MainViewModel) {
-    SectionCard(title = "3) 目录候选与预览") {
+    SectionCard(title = "目录候选与预览") {
         Button(
             onClick = vm::loadCatalogCandidates,
             enabled = !vm.isBusy,
@@ -442,7 +442,12 @@ private fun CrawlCard(
     overlayGranted: Boolean,
     onRequestOverlayPermission: () -> Unit
 ) {
-    SectionCard(title = "4) 抓取与导出") {
+    SectionCard(title = "抓取与导出") {
+        Text(
+            "推荐流程：先登录，再搜索帖子，选择目录候选并完成预览，最后开始抓取或导出。",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
+        )
         OutlinedTextField(
             value = vm.outputTitle,
             onValueChange = {
@@ -552,18 +557,18 @@ private fun CrawlCard(
             Text(if (vm.isBusy) "执行中..." else "开始抓取（TXT）")
         }
         OutlinedButton(
-            onClick = vm::exportLatestToDownloads,
-            enabled = !vm.isBusy,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("一键导出到 Download")
-        }
-        OutlinedButton(
             onClick = vm::retryFailedAndPatch,
             enabled = !vm.isBusy,
             modifier = Modifier.fillMaxWidth()
         ) {
             Text("仅重试失败章节并回填")
+        }
+        OutlinedButton(
+            onClick = vm::exportLatestToDownloads,
+            enabled = !vm.isBusy,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("一键导出到 Download")
         }
         OutlinedButton(
             onClick = vm::openLatestOutput,
@@ -605,7 +610,7 @@ private fun CrawlCard(
 
 @Composable
 private fun LogCard(vm: MainViewModel) {
-    SectionCard(title = "5) 状态与日志") {
+    SectionCard(title = "状态与日志") {
         Text("状态: ${vm.status}")
         OutlinedButton(
             onClick = vm::clearLogs,
@@ -645,7 +650,7 @@ private fun LogCard(vm: MainViewModel) {
 
 @Composable
 private fun SavedFilesCard(vm: MainViewModel) {
-    SectionCard(title = "6) 已抓取文件") {
+    SectionCard(title = "已抓取文件") {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(
                 onClick = vm::refreshSavedFiles,
@@ -659,14 +664,14 @@ private fun SavedFilesCard(vm: MainViewModel) {
                 enabled = !vm.isBusy,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text("打开选中文件（系统默认方式）")
+                Text("打开选中文件")
             }
             OutlinedButton(
                 onClick = vm::convertSelectedTxtToEpub,
                 enabled = !vm.isBusy,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text("将选中 TXT 转换为 EPUB")
+                Text("将选中 TXT 转换为 EPUB（自动繁转简）")
             }
         }
 
@@ -682,7 +687,7 @@ private fun SavedFilesCard(vm: MainViewModel) {
             }
         )
         Text(
-            "提示: 文件列表来自应用目录 output，可直接点击打开；若导出到 Download 失败也可在这里找回。",
+            "提示: 文件列表来自应用目录 output，可直接点击打开；TXT 转 EPUB 与正文抓取都会自动执行繁体转简体。",
             fontSize = 12.sp
         )
     }

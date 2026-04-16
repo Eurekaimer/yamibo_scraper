@@ -3,6 +3,7 @@
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.icu.text.Transliterator
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -39,6 +40,9 @@ private const val MIN_CATALOG_CHAPTERS = 3
 private const val FAILED_MARKER_PREFIX = "#FAILED_CHAPTER_"
 private const val DEFAULT_USER_AGENT =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+private val T2S_TRANSLITERATOR: Transliterator by lazy {
+    Transliterator.getInstance("Traditional-Simplified")
+}
 
 private data class SearchMutable(
     var title: String,
@@ -738,8 +742,10 @@ class YamiboClient(
             return emptyList()
         }
         return matches.map { match ->
-            val title = match.groupValues.getOrNull(1).orEmpty().trim().ifBlank { "章节" }
-            val content = match.groupValues.getOrNull(2).orEmpty().trim()
+            val title = convertToSimplified(
+                match.groupValues.getOrNull(1).orEmpty().trim().ifBlank { "章节" }
+            )
+            val content = convertToSimplified(match.groupValues.getOrNull(2).orEmpty().trim())
             title to content
         }
     }
@@ -1057,7 +1063,7 @@ class YamiboClient(
     }
 
     fun suggestMetaFromThreadTitle(rawTitle: String): Pair<String, String> {
-        val title = rawTitle.trim()
+        val title = convertToSimplified(rawTitle.trim())
         if (title.isBlank()) {
             return "TITLE" to "UNKNOWN"
         }
@@ -1552,7 +1558,15 @@ class YamiboClient(
         if (text.replace(Regex("\\s+"), "").length < 20) {
             throw IllegalStateException("正文内容过短，疑似未命中正文区域")
         }
-        return text
+        return convertToSimplified(text)
+    }
+
+    private fun convertToSimplified(text: String): String {
+        if (text.isBlank()) {
+            return text
+        }
+        return runCatching { T2S_TRANSLITERATOR.transliterate(text) }
+            .getOrDefault(text)
     }
 
     private fun extractAllPostContents(doc: org.jsoup.nodes.Document): Map<String, String> {
