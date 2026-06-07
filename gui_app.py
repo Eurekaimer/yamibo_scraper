@@ -150,6 +150,8 @@ class YamiboGUI:
         self.save_choice_var = tk.StringVar(value="3")
         self.speed_mode_var = tk.StringVar(value="fast")
         self.preview_count_var = tk.StringVar(value="2")
+        self.author_filter_var = tk.StringVar()
+        self.author_page_limit_var = tk.StringVar(value="all")
         self.convert_title_var = tk.StringVar()
         self.convert_author_var = tk.StringVar(value="UNKNOWN")
 
@@ -263,6 +265,14 @@ class YamiboGUI:
         ).pack(side="left", padx=4)
         ttk.Button(search_bar, text="搜索帖子", command=self.search_threads, style="Primary.TButton").pack(side="left", padx=4)
 
+        author_bar = ttk.Frame(left)
+        author_bar.pack(fill="x", pady=2)
+        ttk.Label(author_bar, text="\u4f5c\u8005\u8fc7\u6ee4").pack(side="left")
+        ttk.Entry(author_bar, textvariable=self.author_filter_var, width=18).pack(side="left", padx=6)
+        ttk.Label(author_bar, text="\u626b\u63cf\u9875\u6570").pack(side="left")
+        ttk.Entry(author_bar, textvariable=self.author_page_limit_var, width=5).pack(side="left", padx=4)
+        ttk.Button(author_bar, text="\u6309\u4f5c\u8005\u697c\u5c42\u52a0\u8f7d", command=self.load_author_chapters, style="Ghost.TButton").pack(side="left", padx=4)
+
         ttk.Label(left, text="搜索结果").pack(anchor="w")
         self.result_list = tk.Listbox(
             left,
@@ -279,6 +289,7 @@ class YamiboGUI:
         candidate_bar.pack(fill="x", pady=2)
         ttk.Button(candidate_bar, text="提取目录候选", command=self.load_candidates, style="Primary.TButton").pack(side="left")
         ttk.Button(candidate_bar, text="加载 raw_html 章节", command=self.load_raw_catalog, style="Ghost.TButton").pack(side="left", padx=6)
+        ttk.Button(candidate_bar, text="\u6309\u4f5c\u8005\u697c\u5c42", command=self.load_author_chapters, style="Ghost.TButton").pack(side="left", padx=6)
         ttk.Button(candidate_bar, text="预览章节", command=self.preview_chapters, style="Ghost.TButton").pack(side="left")
 
         ttk.Label(left, text="目录候选").pack(anchor="w")
@@ -492,6 +503,62 @@ class YamiboGUI:
         except Exception as exc:
             messagebox.showerror("错误", str(exc))
 
+    def load_author_chapters(self):
+        try:
+            self._ensure_scraper(auth_required=True)
+            idx = self.result_list.curselection()
+            if not idx:
+                raise ValueError("\u8bf7\u5148\u5728\u641c\u7d22\u7ed3\u679c\u91cc\u9009\u62e9\u4e00\u4e2a\u5e16\u5b50\u3002")
+            item = self.search_results[idx[0]]
+            self.current_source_thread = item
+            author = self.author_filter_var.get().strip()
+            raw_page_limit = self.author_page_limit_var.get().strip().lower()
+            if raw_page_limit in {"", "all", "全部"}:
+                page_limit = None
+                page_limit_display = "all"
+            else:
+                try:
+                    page_limit = int(raw_page_limit)
+                except Exception:
+                    raise ValueError("扫描页数请输入正整数，或输入 all 扫全帖。")
+                if page_limit <= 0:
+                    raise ValueError("扫描页数必须大于 0，或输入 all 扫全帖。")
+                page_limit_display = str(page_limit)
+
+            author_display = author or "\u81ea\u52a8\u8bc6\u522b\u9996\u697c\u4f5c\u8005"
+            self.log(f"\U0001f50e \u6309\u4f5c\u8005\u697c\u5c42\u626b\u63cf\uff1a\u4f5c\u8005={author_display}\uff0c\u9875\u6570={page_limit_display}")
+            chapters = self.scraper.extract_author_chapters_from_thread(
+                item["url"],
+                author=author or None,
+                max_pages=page_limit,
+                min_chars=20,
+            )
+            if not chapters:
+                raise RuntimeError("\u672a\u63d0\u53d6\u5230\u7b26\u5408\u6761\u4ef6\u7684\u4f5c\u8005\u6b63\u6587\u697c\u5c42\u3002\u53ef\u5c1d\u8bd5\u6e05\u7a7a\u4f5c\u8005\u8fc7\u6ee4\u6216\u589e\u52a0\u626b\u63cf\u9875\u6570\u3002")
+
+            actual_author = chapters[0].get("author", author or "auto")
+            if actual_author and not self.author_filter_var.get().strip():
+                self.author_filter_var.set(actual_author)
+            candidate = {
+                "selector": f"author-posts:{actual_author or 'any'}",
+                "chapters": chapters,
+                "chapter_count": len(chapters),
+                "score": float(len(chapters)),
+                "score_reason": {},
+                "sample_titles": [chapter["title"] for chapter in chapters[:3]],
+            }
+            self.catalog_candidates = [candidate]
+            self.current_chapters = chapters
+            self.preview_cache = {}
+            self.candidate_list.delete(0, "end")
+            self.candidate_list.insert("end", f"{candidate['selector']} | \u7ae0\u8282:{len(chapters)} | \u4f5c\u8005\u697c\u5c42")
+            self.candidate_list.selection_clear(0, "end")
+            self.candidate_list.selection_set(0)
+            self.candidate_list.activate(0)
+            self.log(f"\u2705 \u5df2\u6309\u4f5c\u8005\u697c\u5c42\u52a0\u8f7d {len(chapters)} \u7ae0\u3002")
+        except Exception as exc:
+            messagebox.showerror("\u9519\u8bef", str(exc))
+
     def load_raw_catalog(self):
         try:
             self._ensure_scraper(auth_required=False)
@@ -535,7 +602,7 @@ class YamiboGUI:
             self.log(f"👀 开始预览前 {count} 章...")
             for i in range(count):
                 c = chapters[i]
-                content = self.scraper.fetch_chapter_content(c["url"])
+                content = c.get("content") or self.scraper.fetch_chapter_content(c["url"])
                 self.preview_cache[i] = content
                 snippet = re.sub(r"\s+", " ", content).strip()[:120]
                 self.log(f"[预览 {i + 1}] {c['title']}: {snippet}...")
@@ -669,6 +736,8 @@ class YamiboGUI:
             for i, ch in enumerate(chapters):
                 if i in self.preview_cache:
                     content = self.preview_cache[i]
+                elif ch.get("content"):
+                    content = ch["content"]
                 else:
                     content = self.scraper.fetch_chapter_content(ch["url"])
 

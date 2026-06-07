@@ -1,6 +1,7 @@
 import random
 import re
 import time
+import sys
 
 from auth import create_session, login_with_password, prompt_cookie
 from cli import (
@@ -14,6 +15,7 @@ from cli import (
     choose_thread,
     edit_config_interactive,
     get_auth_mode,
+    get_author_post_options,
     get_catalog_mode,
     get_crawl_speed_mode,
     get_main_action,
@@ -43,6 +45,14 @@ from yamibo_output import (
 )
 
 MAX_SEARCH_CANDIDATE_TRIES = 10
+
+
+def configure_console_output() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
 
 def build_authenticated_session(config):
@@ -159,6 +169,34 @@ def resolve_chapters_from_search(scraper: YamiboScraper) -> tuple[list[dict], di
     return [], selected
 
 
+def resolve_author_chapters_from_search(scraper: YamiboScraper) -> tuple[list[dict], dict | None]:
+    keyword = get_search_keyword()
+    forum_ids = get_search_forum_scope()
+    results = search_threads_by_keyword(scraper.session, keyword, forum_ids=forum_ids, limit=20)
+    selected = choose_thread(results)
+    if not selected:
+        return [], None
+
+    author, max_pages = get_author_post_options()
+    author_display = author or "\u81ea\u52a8\u8bc6\u522b\u9996\u697c\u4f5c\u8005"
+    print(
+        f"\n\U0001f50e \u6309\u4f5c\u8005\u697c\u5c42\u626b\u63cf\uff1a\u4f5c\u8005={author_display}\uff0c"
+        f"\u9875\u6570\u4e0a\u9650={max_pages}"
+    )
+    chapters = scraper.extract_author_chapters_from_thread(
+        selected["url"],
+        author=author or None,
+        max_pages=max_pages,
+        min_chars=80,
+    )
+    if chapters:
+        actual_author = chapters[0].get("author") or author or "auto"
+        print(f"\u2705 \u5df2\u6309\u4f5c\u8005\u697c\u5c42\u63d0\u53d6 {len(chapters)} \u7ae0\uff0c\u4f5c\u8005ID\uff1a{actual_author}")
+    else:
+        print("\u26a0\ufe0f \u672a\u63d0\u53d6\u5230\u7b26\u5408\u6761\u4ef6\u7684\u4f5c\u8005\u6b63\u6587\u697c\u5c42\u3002")
+    return chapters, selected
+
+
 def prepare_chapters(scraper: YamiboScraper, config) -> tuple[list[dict], dict | None, str]:
     mode = get_catalog_mode()
     if mode == "1":
@@ -171,6 +209,9 @@ def prepare_chapters(scraper: YamiboScraper, config) -> tuple[list[dict], dict |
         chapters = scraper.parse_catalog(config.raw_html_catalog)
         print(f"✅ 从 raw_html_catalog 解析出 {len(chapters)} 个章节链接。")
         return chapters, None, mode
+    if mode == "3":
+        chapters, source_thread = resolve_author_chapters_from_search(scraper)
+        return chapters, source_thread, mode
     chapters, source_thread = resolve_chapters_from_search(scraper)
     return chapters, source_thread, mode
 
@@ -184,7 +225,7 @@ def preview_chapters(scraper: YamiboScraper, chapters: list[dict]) -> tuple[bool
     print(f"\n开始抓取预览章节（共 {preview_count} 章）...")
     for index in range(preview_count):
         chapter = chapters[index]
-        content = scraper.fetch_chapter_content(chapter["url"])
+        content = chapter.get("content") or scraper.fetch_chapter_content(chapter["url"])
         preview_cache[index] = content
         snippet = re.sub(r"\s+", " ", content).strip()
         snippet = f"{snippet[:100]}..." if len(snippet) > 100 else snippet
@@ -285,7 +326,7 @@ def run_scraper(config):
         )
 
     for index, chapter in enumerate(chapters):
-        content = preview_cache[index] if index in preview_cache else scraper.fetch_chapter_content(chapter["url"])
+        content = preview_cache[index] if index in preview_cache else chapter.get("content") or scraper.fetch_chapter_content(chapter["url"])
         if index in preview_cache:
             print(f"[{index + 1}/{len(chapters)}] {chapter['title']} | 使用预览缓存")
 
@@ -382,6 +423,7 @@ def run_txt_to_epub_from_output(config) -> None:
 
 
 def main():
+    configure_console_output()
     print_terminal_encoding_hint()
     config = load_config()
     while True:

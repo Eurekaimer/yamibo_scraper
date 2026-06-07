@@ -15,3 +15,8 @@ dependencies = [
 dev = [
     "pyinstaller>=6.19.0",
 ]
+
+[project.scripts]
+yamibo = "yamibo_scraper:main"
+yamibo-gui = "gui_app:launch_gui"
+yamibo-cmd = "yamibo_cmd:main"

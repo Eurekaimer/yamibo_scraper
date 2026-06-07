@@ -4,8 +4,12 @@ import re
 from urllib.parse import quote_plus
 
 from bs4 import BeautifulSoup
+from opencc import OpenCC
 
 BASE_URL = "https://bbs.yamibo.com/"
+_cc = OpenCC("t2s")
+_QUERY_SPLIT_RE = re.compile(r"[\s,\uFF0C\u3001\u3002\uFF1B;\uFF1A:\u300A\u300B\u3008\u3009\u300E\u300F\u300C\u300D()\uFF08\uFF09\[\]\u3010\u3011]+")
+
 FORUM_NAME_MAP = {
     49: "文学区",
     55: "译文区",
@@ -144,6 +148,39 @@ def _collect_results_from_soup(
             item[rank_field] = rank
 
 
+def _query_variants(keyword: str) -> list[str]:
+    raw = (keyword or "").strip()
+    if not raw:
+        return []
+
+    candidates: list[str] = [raw]
+    simplified = _cc.convert(raw)
+    if simplified != raw:
+        candidates.append(simplified)
+
+    for base in list(candidates):
+        parts = [
+            p.strip()
+            for p in re.split(_QUERY_SPLIT_RE, base)
+            if p.strip()
+        ]
+        candidates.extend(part for part in parts if len(part) >= 4)
+
+    compact = re.sub(_QUERY_SPLIT_RE, "", simplified)
+    if compact and compact != simplified:
+        candidates.append(compact)
+
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in candidates:
+        normalized = item.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+    return result[:6]
+
+
 def search_threads_by_keyword(
     session,
     keyword: str,
@@ -152,7 +189,7 @@ def search_threads_by_keyword(
 ) -> list[dict]:
     """按关键字搜索百合会帖子，支持限制分区。"""
 
-    query = quote_plus(keyword)
+    query_variants = _query_variants(keyword)
     scoped_forums = forum_ids or [55, 49]
     forum_set = set(scoped_forums) if scoped_forums else None
 
@@ -160,36 +197,40 @@ def search_threads_by_keyword(
 
     for order_key in ("replies", "views"):
         for fid in scoped_forums:
-            before_count = len(result_map)
-            url_candidates = [
-                (
-                    f"{BASE_URL}search.php?mod=forum&searchsubmit=yes"
-                    f"&srchfid%5B%5D={fid}&orderby={order_key}&ascdesc=desc"
-                    f"&srchtxt={query}&kw={query}"
-                ),
-                (
-                    f"{BASE_URL}search.php?mod=forum&searchsubmit=yes"
-                    f"&srchfid%5B%5D={fid}&orderby={order_key}&ascdesc=desc"
-                    f"&srchtxt={query}"
-                ),
-            ]
+            for query_text in query_variants:
+                before_count = len(result_map)
+                query = quote_plus(query_text)
+                url_candidates = [
+                    (
+                        f"{BASE_URL}search.php?mod=forum&searchsubmit=yes"
+                        f"&srchfid%5B%5D={fid}&orderby={order_key}&ascdesc=desc"
+                        f"&srchtxt={query}&kw={query}"
+                    ),
+                    (
+                        f"{BASE_URL}search.php?mod=forum&searchsubmit=yes"
+                        f"&srchfid%5B%5D={fid}&orderby={order_key}&ascdesc=desc"
+                        f"&srchtxt={query}"
+                    ),
+                ]
 
-            for url in url_candidates:
-                try:
-                    response = session.get(url, timeout=20)
-                    response.raise_for_status()
-                except Exception as exc:
-                    print(f"⚠️ 搜索请求失败（fid={fid}, order={order_key}）：{exc}")
-                    continue
+                for url in url_candidates:
+                    try:
+                        response = session.get(url, timeout=20)
+                        response.raise_for_status()
+                    except Exception as exc:
+                        print(f"search request failed (fid={fid}, order={order_key}, query={query_text}): {exc}")
+                        continue
 
-                soup = BeautifulSoup(response.content, "html.parser")
-                _collect_results_from_soup(
-                    soup=soup,
-                    result_map=result_map,
-                    forum_ids=forum_set,
-                    fallback_fid=fid,
-                    order_key=order_key,
-                )
+                    soup = BeautifulSoup(response.content, "html.parser")
+                    _collect_results_from_soup(
+                        soup=soup,
+                        result_map=result_map,
+                        forum_ids=forum_set,
+                        fallback_fid=fid,
+                        order_key=order_key,
+                    )
+                    if len(result_map) > before_count:
+                        break
                 if len(result_map) > before_count:
                     break
 

@@ -65,15 +65,16 @@ def get_auth_mode() -> str:
 
 
 def get_catalog_mode() -> str:
-    print("\n请选择抓取来源：")
-    print("1. 使用 RAW_HTML_CATALOG（旧模式）")
-    print("2. 根据小说名自动搜索（新骨架）")
+    print("\n\u8bf7\u9009\u62e9\u6293\u53d6\u6765\u6e90\uff1a")
+    print("1. \u4f7f\u7528 RAW_HTML_CATALOG\uff08\u65e7\u6a21\u5f0f\uff09")
+    print("2. \u6839\u636e\u5c0f\u8bf4\u540d\u81ea\u52a8\u641c\u7d22\u76ee\u5f55")
+    print("3. \u6839\u636e\u5c0f\u8bf4\u540d\u641c\u7d22\u540e\u6309\u4f5c\u8005\u697c\u5c42\u6293\u53d6\uff08\u65e0\u7535\u68af fallback\uff09")
 
     while True:
-        mode = input("请输入对应数字 (1/2): ").strip()
-        if mode in ["1", "2"]:
+        mode = input("\u8bf7\u8f93\u5165\u5bf9\u5e94\u6570\u5b57 (1/2/3): ").strip()
+        if mode in ["1", "2", "3"]:
             return mode
-        print("输入无效，请重新输入 1 或 2。")
+        print("\u8f93\u5165\u65e0\u6548\uff0c\u8bf7\u91cd\u65b0\u8f93\u5165 1\u30012 \u6216 3\u3002")
 
 
 def get_search_keyword() -> str:
@@ -84,6 +85,15 @@ def get_search_keyword() -> str:
         print("关键词不能为空，请重新输入。")
 
 
+def get_author_post_options() -> tuple[str, int | None]:
+    author = input("\u4f5c\u8005\u697c\u5c42\u8fc7\u6ee4\uff08\u7559\u7a7a=\u81ea\u52a8\u4f7f\u7528\u9996\u4e2a\u6b63\u6587\u697c\u5c42\u4f5c\u8005ID\uff09: ").strip()
+    while True:
+        raw = input("\u6700\u591a\u626b\u63cf\u9875\u6570\uff08\u9ed8\u8ba4 all \u626b\u5168\u5e16\uff09: ").strip().lower()
+        if not raw or raw in {"all", "\u5168\u90e8"}:
+            return author, None
+        if raw.isdigit() and int(raw) > 0:
+            return author, int(raw)
+        print("\u8f93\u5165\u65e0\u6548\uff0c\u8bf7\u8f93\u5165\u6b63\u6574\u6570\u3001all\uff0c\u6216\u76f4\u63a5\u56de\u8f66\u3002")
 def get_search_forum_scope() -> list[int]:
     print("\n请选择搜索分区：")
     print("1. 译文区（forum-55）")

@@ -71,7 +71,7 @@ def save_to_txt(chapters: list[dict], filename: Path) -> None:
     with open(filename, "w", encoding="utf-8") as handle:
         for chapter in chapters:
             handle.write(f"==== {chapter['title']} ====\n\n{chapter['content']}\n\n\n")
-    print(f"📄 TXT 文件已保存至: {filename}")
+    print(f"TXT saved: {filename}")
 
 
 def save_to_epub(chapters: list[dict], filename: Path, title: str, author: str) -> None:
@@ -95,7 +95,7 @@ def save_to_epub(chapters: list[dict], filename: Path, title: str, author: str) 
     book.add_item(epub.EpubNav())
     book.spine = ["nav"] + epub_chapters
     epub.write_epub(filename, book, {})
-    print(f"📚 EPUB 文件已保存至: {filename}")
+    print(f"EPUB saved: {filename}")
 
 
 def parse_chapters_from_txt(filename: Path) -> list[dict]:
@@ -113,7 +113,7 @@ def dump_failed_chapters(failed_records: list[dict], output_file: Path) -> None:
         json.dumps(failed_records, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    print(f"🗂️ 失败章节记录已保存：{output_file}")
+    print(f"Failed chapter record saved: {output_file}")
 
 
 def retry_failed_chapters(scraper: YamiboScraper, failed_file: Path, txt_file: Path) -> list[dict]:
@@ -130,14 +130,14 @@ def retry_failed_chapters(scraper: YamiboScraper, failed_file: Path, txt_file: P
 
     print("\n开始重试失败章节并回填 TXT ...")
     for item in records:
-        print(f"🔁 重试：{item['title']}")
+        print(f"Retry: {item['title']}")
         refreshed = scraper.fetch_chapter_content(item["url"])
         if refreshed.startswith("【最终失败"):
             still_failed.append(item)
-            print("   ❌ 仍失败，保留标记。")
+            print("   Still failed; marker kept.")
             continue
         txt_content = txt_content.replace(item["marker"], refreshed, 1)
-        print("   ✅ 回填成功。")
+        print("   Refilled.")
         time.sleep(1)
 
     txt_file.write_text(txt_content, encoding="utf-8")
@@ -145,5 +145,5 @@ def retry_failed_chapters(scraper: YamiboScraper, failed_file: Path, txt_file: P
         dump_failed_chapters(still_failed, failed_file)
     else:
         failed_file.unlink(missing_ok=True)
-        print("🎉 失败章节全部回填成功，失败记录文件已移除。")
+        print("All failed chapters refilled; record removed.")
     return still_failed

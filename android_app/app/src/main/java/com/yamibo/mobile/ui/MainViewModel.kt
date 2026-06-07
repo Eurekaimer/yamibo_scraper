@@ -34,6 +34,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     var keyword by mutableStateOf("")
     var forumScope by mutableStateOf(ForumScope.BOTH)
+    var authorFilter by mutableStateOf("")
+    var authorPageLimitText by mutableStateOf("5")
 
     var speedMode by mutableStateOf(SpeedMode.FAST)
         private set
@@ -348,6 +350,52 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 appendLog("目录候选已提取: ${candidates.size} 个")
             } catch (e: Exception) {
                 appendLog("提取目录失败: ${e.message}")
+            } finally {
+                isBusy = false
+            }
+        }
+    }
+
+    fun loadAuthorChapters() {
+        if (isBusy) {
+            return
+        }
+
+        val selectedThread = searchResults.getOrNull(selectedSearchIndex)
+        if (selectedThread == null) {
+            appendLog("\u8bf7\u5148\u5728\u641c\u7d22\u7ed3\u679c\u4e2d\u9009\u62e9\u4e00\u4e2a\u5e16\u5b50")
+            return
+        }
+
+        viewModelScope.launch {
+            isBusy = true
+            try {
+                persistNow()
+                val c = ensureAuthenticated(authRequired = true)
+                val author = authorFilter.trim()
+                val pageLimit = authorPageLimitText.trim().toIntOrNull()?.coerceIn(1, 200) ?: 5
+                appendLog("\u6309\u4f5c\u8005\u697c\u5c42\u626b\u63cf\uff1a\u4f5c\u8005=${author.ifBlank { "\u81ea\u52a8\u8bc6\u522b\u9996\u697c\u4f5c\u8005" }}\uff0c\u9875\u6570=$pageLimit")
+                val candidate = withContext(Dispatchers.IO) {
+                    c.extractAuthorChaptersFromThread(
+                        threadUrl = selectedThread.url,
+                        author = author.ifBlank { null },
+                        maxPages = pageLimit,
+                        minChars = 80
+                    )
+                }
+
+                catalogCandidates = listOf(candidate)
+                selectedCandidateIndex = 0
+                previewItems = emptyList()
+                previewCache = emptyMap()
+                previewConfirmed = false
+                val actual = candidate.selector.substringAfter("author-posts:", "")
+                if (authorFilter.isBlank() && actual.isNotBlank() && actual != "auto") {
+                    authorFilter = actual
+                }
+                appendLog("\u5df2\u6309\u4f5c\u8005\u697c\u5c42\u52a0\u8f7d ${candidate.chapterCount} \u7ae0")
+            } catch (e: Exception) {
+                appendLog("\u6309\u4f5c\u8005\u697c\u5c42\u52a0\u8f7d\u5931\u8d25: ${e.message}")
             } finally {
                 isBusy = false
             }

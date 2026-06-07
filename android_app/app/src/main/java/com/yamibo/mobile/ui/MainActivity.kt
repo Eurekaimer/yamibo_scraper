@@ -374,6 +374,30 @@ private fun CatalogCard(vm: MainViewModel) {
             Text("提取目录候选")
         }
 
+        OutlinedTextField(
+            value = vm.authorFilter,
+            onValueChange = { vm.authorFilter = it },
+            label = { Text("\u4f5c\u8005\u8fc7\u6ee4\uff08\u7559\u7a7a\u81ea\u52a8\u9996\u697c\u4f5c\u8005\uff09") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        OutlinedTextField(
+            value = vm.authorPageLimitText,
+            onValueChange = { vm.authorPageLimitText = it.filter { ch -> ch.isDigit() }.take(3) },
+            label = { Text("\u4f5c\u8005\u697c\u5c42\u626b\u63cf\u9875\u6570") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            modifier = Modifier.fillMaxWidth()
+        )
+        OutlinedButton(
+            onClick = vm::loadAuthorChapters,
+            enabled = !vm.isBusy,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("\u6309\u4f5c\u8005\u697c\u5c42\u52a0\u8f7d")
+        }
+
+
         Spacer(modifier = Modifier.height(4.dp))
         Text("目录候选（可手动选择）", fontWeight = FontWeight.SemiBold)
         SelectableListBox(

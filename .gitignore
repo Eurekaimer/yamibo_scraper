@@ -1,4 +1,5 @@
 # Python-generated files
+*.log
 __pycache__/
 *.pyc
 *.py[oc]

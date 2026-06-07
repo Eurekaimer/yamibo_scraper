@@ -52,6 +52,20 @@ _NUMERIC_TITLE_RE = re.compile(r"\d{1,4}([#.]|\s*话)?", re.I)
 _SUSPICIOUS_TITLE_RE = re.compile(r"[#\[\]【】复制链接只看举报楼主沙发板凳]")
 _POSTMESSAGE_RE = re.compile(r"^postmessage_\d+$")
 _CATALOG_LINK_RE = re.compile(r'https?://bbs\.yamibo\.com/[^\s"<>]+viewthread[^\s"<>]*')
+_THREAD_ID_RE = re.compile(r"(?:[?&]tid=|thread-)(\d+)")
+_THREAD_PAGE_RE = re.compile(r"thread-\d+-(\d+)-\d+\.html")
+_QUERY_PAGE_RE = re.compile(r"(?:[?&]|&amp;)page=(\d+)")
+_POST_CONTAINER_RE = re.compile(r"^(post_|pid)\d+")
+_EDIT_NOTICE_RE = re.compile(r"^\u672c\u5e16\u6700\u540e\u7531\s+.+?\s+\u4e8e\s+.+?\s+\u7f16\u8f91\s*$")
+_CHAPTER_HEADING_RE = re.compile(
+    r"^(?:"
+    r"\u7b2c?\s*[\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u767e\u5343\u3007\u96f6\u4e24\d]+(?:\u53c8[\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u767e\u5343\u3007\u96f6\u4e24\d]+\u5206\u4e4b[\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u767e\u5343\u3007\u96f6\u4e24\d]+)?"
+    r"|\u756a\u5916(?:[\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u767e\u5343\u3007\u96f6\u4e24\d]+)?"
+    r"|\u5c3e\u58f0(?:[\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u767e\u5343\u3007\u96f6\u4e24\d]+)?"
+    r"|\u540e\u8bb0|\u5e8f\u7ae0|\u7ec8\u7ae0"
+    r")\s*[\u3001.\uff0e\s].{0,80}$"
+)
+
 
 _NOISE_KEYWORDS = (
     "只看该作者",
@@ -82,6 +96,28 @@ _CATALOG_FALLBACK_SELECTORS = (
     "div.pcb",
 )
 
+_POST_AUTHOR_SELECTORS = (
+    ".authi a[href*='space']",
+    ".pls .xw1 a",
+    ".pls a[href*='space']",
+    "a[href*='uid=']",
+    "a[href*='space-uid']",
+)
+
+_CONTENT_NOISE_SELECTORS = (
+    "script",
+    "style",
+    "i.pstatus",
+    ".pstatus",
+    ".quote",
+    ".blockquote",
+    ".attach_nopermission",
+    ".locked",
+    ".ignore_js_op",
+    ".aimg_tip",
+    ".tip",
+)
+
 
 class YamiboScraper:
     def __init__(self, session):
@@ -90,7 +126,12 @@ class YamiboScraper:
 
     @staticmethod
     def _extract_pid(url: str) -> str:
-        return parse_qs(urlparse(url).query).get("pid", [""])[0]
+        parsed = urlparse(url or "")
+        pid = parse_qs(parsed.query).get("pid", [""])[0]
+        if pid:
+            return pid
+        fragment_match = re.search(r"pid(\d+)", parsed.fragment or "")
+        return fragment_match.group(1) if fragment_match else ""
 
     @staticmethod
     def _is_probable_chapter_title(title: str) -> bool:
@@ -292,10 +333,217 @@ class YamiboScraper:
             return []
         best = candidates[0]
         print(
-            f"   ✅ 自动选择最佳候选（{best['selector']}），"
+            f"   auto selected candidate ({best['selector']}), "
             f"章节 {best['chapter_count']}，评分 {best['score']:.1f}。"
         )
         return best["chapters"]
+
+
+    @staticmethod
+    def _extract_tid(url: str) -> str:
+        match = _THREAD_ID_RE.search(url or "")
+        return match.group(1) if match else ""
+
+    def _thread_page_url(self, thread_url: str, page: int) -> str:
+        normalized = self._normalize_url(thread_url)
+        tid = self._extract_tid(normalized)
+        if not tid:
+            return normalized
+        if "thread-" in normalized:
+            return urljoin(BASE_URL, f"thread-{tid}-{page}-1.html")
+        return urljoin(BASE_URL, f"forum.php?mod=viewthread&tid={tid}&page={page}")
+
+    @staticmethod
+    def _page_number_from_href(href: str) -> int | None:
+        match = _THREAD_PAGE_RE.search(href or "")
+        if match:
+            return int(match.group(1))
+        match = _QUERY_PAGE_RE.search(href or "")
+        if match:
+            return int(match.group(1))
+        return None
+
+    def _thread_page_urls(self, thread_url: str, soup: BeautifulSoup, total_pages: int) -> list[str]:
+        urls = {1: self._normalize_url(thread_url)}
+        for anchor in soup.select(".pg a[href]"):
+            page = self._page_number_from_href(anchor.get("href", ""))
+            if page and page > 1:
+                urls[page] = self._normalize_url(anchor.get("href", ""))
+        return [urls.get(page) or self._thread_page_url(thread_url, page) for page in range(1, total_pages + 1)]
+
+    @staticmethod
+    def _max_thread_page(soup: BeautifulSoup) -> int:
+        pages = [1]
+        for anchor in soup.select(".pg a[href]"):
+            href = anchor.get("href", "")
+            page = YamiboScraper._page_number_from_href(href)
+            if page:
+                pages.append(page)
+            text = anchor.get_text(strip=True)
+            if text.isdigit():
+                pages.append(int(text))
+        for node in soup.select(".pg, .pgb"):
+            for page_text in re.findall(r"\d+", node.get_text(" ", strip=True)):
+                pages.append(int(page_text))
+        return max(pages)
+
+    @staticmethod
+    def _extract_post_author(post_node) -> str:
+        for selector in _POST_AUTHOR_SELECTORS:
+            node = post_node.select_one(selector)
+            if node:
+                author = node.get_text(strip=True)
+                if author and author not in {"[\u590d\u5236\u94fe\u63a5]", "\u590d\u5236\u94fe\u63a5"}:
+                    return author
+        return ""
+
+    @staticmethod
+    def _is_noise_content_line(line: str) -> bool:
+        return any(line == keyword or (len(line) <= 12 and keyword in line) for keyword in _NOISE_KEYWORDS)
+
+    def _infer_default_author_from_soup(self, soup: BeautifulSoup, min_chars: int) -> str:
+        for content_node in soup.select("td[id^='postmessage_'], div[id^='postmessage_']"):
+            post_node = content_node.find_parent(id=_POST_CONTAINER_RE) or content_node.find_parent("table") or content_node
+            post_author = self._extract_post_author(post_node)
+            if not post_author:
+                continue
+            try:
+                post_text = self._clean_content_node(content_node)
+            except Exception:
+                return post_author
+            if len(re.sub(r"\s+", "", post_text)) >= min_chars:
+                return post_author
+        return ""
+
+    def _clean_content_node(self, content_node) -> str:
+        node = BeautifulSoup(str(content_node), "html.parser")
+        root = node.find(id=content_node.get("id")) or node
+        for noise in root.select(", ".join(_CONTENT_NOISE_SELECTORS)):
+            noise.decompose()
+
+        lines: list[str] = []
+        for raw_line in root.get_text(separator="\n", strip=True).splitlines():
+            line = raw_line.replace("\xa0", " ").strip()
+            if not line:
+                continue
+            if _EDIT_NOTICE_RE.match(line):
+                continue
+            if self._is_noise_content_line(line):
+                continue
+            lines.append(line)
+
+        text = "\n".join(lines)
+        if ENABLE_SIMPLIFIED:
+            text = _cc.convert(text)
+        text = re.sub(r"[ \t]+\n", "\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+        if len(re.sub(r"\s+", "", text)) < 20:
+            raise ValueError("content too short; probable non-content node")
+        return text
+
+    @staticmethod
+    def _guess_post_title(text: str, fallback: str) -> str:
+        for line in (text or "").splitlines()[:18]:
+            candidate = line.strip()
+            if not candidate:
+                continue
+            if _EDIT_NOTICE_RE.match(candidate):
+                continue
+            if _CHAPTER_HEADING_RE.match(candidate):
+                return candidate[:80]
+        return fallback
+
+    def _extract_author_posts_from_soup(
+        self,
+        soup: BeautifulSoup,
+        thread_url: str,
+        author: str | None,
+        min_chars: int,
+        start_index: int,
+    ) -> list[dict]:
+        chapters: list[dict] = []
+        expected_author = (author or "").strip()
+        for content_node in soup.select("td[id^='postmessage_'], div[id^='postmessage_']"):
+            pid = content_node.get("id", "").replace("postmessage_", "", 1)
+            post_node = content_node.find_parent(id=_POST_CONTAINER_RE) or content_node.find_parent("table") or content_node
+            post_author = self._extract_post_author(post_node)
+            if expected_author and post_author != expected_author:
+                continue
+
+            try:
+                post_text = self._clean_content_node(content_node)
+            except Exception:
+                continue
+            if len(re.sub(r"\s+", "", post_text)) < min_chars:
+                continue
+
+            index = start_index + len(chapters) + 1
+            fallback_title = f"\u4f5c\u8005\u697c\u5c42 {index}"
+            title = self._guess_post_title(post_text, fallback_title)
+            tid = self._extract_tid(thread_url)
+            chapter_url = self._normalize_url(f"forum.php?mod=viewthread&tid={tid}&pid={pid}") if tid else thread_url
+            chapters.append(
+                {
+                    "title": title,
+                    "url": chapter_url,
+                    "pid": pid,
+                    "author": post_author,
+                    "order_hint": index - 1,
+                    "content": post_text,
+                }
+            )
+        return chapters
+
+    def extract_author_chapters_from_thread(
+        self,
+        thread_url: str,
+        author: str | None = None,
+        max_pages: int | None = None,
+        min_chars: int = 20,
+    ) -> list[dict]:
+        """Build chapters from substantial posts by one author, without relying on a catalog/elevator."""
+
+        first_response = self.session.get(thread_url, timeout=20)
+        first_response.raise_for_status()
+        first_soup = BeautifulSoup(first_response.content, "html.parser")
+        total_pages = self._max_thread_page(first_soup)
+        if max_pages is not None:
+            total_pages = min(total_pages, max(1, max_pages))
+
+        if not (author or "").strip():
+            author = self._infer_default_author_from_soup(first_soup, min_chars)
+
+        chapters = self._extract_author_posts_from_soup(
+            first_soup,
+            thread_url=thread_url,
+            author=author,
+            min_chars=min_chars,
+            start_index=0,
+        )
+        seen_pids = {chapter.get("pid") for chapter in chapters if chapter.get("pid")}
+
+        page_urls = self._thread_page_urls(thread_url, first_soup, total_pages)
+        for page_url in page_urls[1:]:
+            time.sleep(random.uniform(0.25, 0.65))
+            response = self.session.get(page_url, timeout=20)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.content, "html.parser")
+            page_chapters = self._extract_author_posts_from_soup(
+                soup,
+                thread_url=thread_url,
+                author=author,
+                min_chars=min_chars,
+                start_index=len(chapters),
+            )
+            for chapter in page_chapters:
+                pid = chapter.get("pid")
+                if pid and pid in seen_pids:
+                    continue
+                if pid:
+                    seen_pids.add(pid)
+                chapters.append(chapter)
+
+        return chapters
 
     def fetch_chapter_content(self, url: str) -> str:
         pid = self._extract_pid(url) or None
@@ -318,20 +566,9 @@ class YamiboScraper:
                 if not content_node:
                     raise ValueError("正文未找到")
 
-                for pstatus in content_node.find_all("i", class_="pstatus"):
-                    pstatus.decompose()
-                for noise in content_node.select("script, style"):
-                    noise.decompose()
-
-                text = content_node.get_text(separator="\n", strip=True)
-                if ENABLE_SIMPLIFIED:
-                    text = _cc.convert(text)
-                text = re.sub(r"\n{3,}", "\n\n", text)
-                if len(re.sub(r"\s+", "", text)) < 20:
-                    raise ValueError("正文内容过短，疑似未命中正文区域")
-                return text
+                return self._clean_content_node(content_node)
             except Exception as exc:
-                print(f"    ⚠️ 第{attempt + 1}次失败: {exc}")
+                print(f"    attempt {attempt + 1} failed: {exc}")
                 if attempt == MAX_RETRIES - 1:
                     return f"【最终失败：{exc}】"
                 time.sleep((2 ** attempt) + random.uniform(0, RETRY_JITTER_MAX))

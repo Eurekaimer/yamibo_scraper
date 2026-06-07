@@ -314,6 +314,67 @@ class YamiboClient(
             .take(8)
     }
 
+    fun extractAuthorChaptersFromThread(
+        threadUrl: String,
+        author: String? = null,
+        maxPages: Int = 5,
+        minChars: Int = 80
+    ): CatalogCandidate {
+        val firstHtml = getText(threadUrl)
+        val firstDoc = Jsoup.parse(firstHtml, BASE_URL)
+        val pageLimit = maxPages.coerceIn(1, 200)
+        val totalPages = minOf(maxThreadPage(firstDoc), pageLimit)
+        val authorFilter = author?.trim()?.takeIf { it.isNotBlank() }
+            ?: inferDefaultPostAuthor(firstDoc, minChars)
+
+        val chapters = mutableListOf<Chapter>()
+        val seenPids = mutableSetOf<String>()
+        fun appendFrom(doc: org.jsoup.nodes.Document) {
+            extractAuthorPostsFromDoc(
+                doc = doc,
+                threadUrl = threadUrl,
+                author = authorFilter,
+                minChars = minChars,
+                startIndex = chapters.size
+            ).forEach { chapter ->
+                if (chapter.pid.isNotBlank() && !seenPids.add(chapter.pid)) {
+                    return@forEach
+                }
+                chapters += chapter
+            }
+        }
+
+        appendFrom(firstDoc)
+        for (page in 2..totalPages) {
+            Thread.sleep(Random.nextLong(250L, 650L))
+            val html = getText(threadPageUrl(threadUrl, page))
+            appendFrom(Jsoup.parse(html, BASE_URL))
+        }
+
+        if (chapters.isEmpty()) {
+            throw IllegalStateException("\u672a\u63d0\u53d6\u5230\u7b26\u5408\u6761\u4ef6\u7684\u4f5c\u8005\u6b63\u6587\u697c\u5c42")
+        }
+        val actualAuthor = chapters.firstOrNull()?.let { authorFilter.ifBlank { "auto" } } ?: "auto"
+        return CatalogCandidate(
+            selector = "author-posts:$actualAuthor",
+            chapters = chapters,
+            chapterCount = chapters.size,
+            score = chapters.size.toDouble(),
+            scoreDetail = CatalogScoreDetail(
+                base = chapters.size.toDouble(),
+                pidBonus = chapters.count { it.pid.isNotBlank() } * 1.4,
+                titleBonus = 0.0,
+                structureBonus = 0.0,
+                sizeBonus = 0.0,
+                qualityPenalty = 0.0,
+                pidCount = chapters.count { it.pid.isNotBlank() },
+                probableTitleCount = 0,
+                suspiciousTitleCount = 0
+            ),
+            sampleTitles = chapters.take(3).map { it.title }
+        )
+    }
+
     suspend fun previewChapters(
         chapters: List<Chapter>,
         previewCount: Int,
@@ -1228,6 +1289,99 @@ class YamiboClient(
         }
     }
 
+    private fun maxThreadPage(doc: org.jsoup.nodes.Document): Int {
+        val pages = mutableListOf(1)
+        doc.select(".pg a[href]").forEach { anchor ->
+            Regex("thread-\\d+-(\\d+)-\\d+\\.html").find(anchor.attr("href"))
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.toIntOrNull()
+                ?.let { pages += it }
+            anchor.text().trim().toIntOrNull()?.let { pages += it }
+        }
+        return pages.maxOrNull() ?: 1
+    }
+
+    private fun threadPageUrl(threadUrl: String, page: Int): String {
+        val tid = extractTid(threadUrl)
+        return if (tid.isNotBlank()) normalizeUrl("thread-$tid-$page-1.html") else normalizeUrl(threadUrl)
+    }
+
+    private fun extractPostAuthor(postNode: Element): String {
+        val selectors = listOf(
+            ".authi a[href*=space]",
+            ".pls .xw1 a",
+            ".pls a[href*=space]",
+            "a[href*=uid=]",
+            "a[href*=space-uid]"
+        )
+        selectors.forEach { selector ->
+            val author = postNode.selectFirst(selector)?.text()?.trim().orEmpty()
+            if (author.isNotBlank() && author != "[\u590d\u5236\u94fe\u63a5]" && author != "\u590d\u5236\u94fe\u63a5") {
+                return author
+            }
+        }
+        return ""
+    }
+
+    private fun postContainerFor(contentNode: Element): Element {
+        return contentNode.parents().firstOrNull { Regex("^(post_|pid)\\d+").matches(it.id()) }
+            ?: contentNode.parents().firstOrNull { it.tagName() == "table" }
+            ?: contentNode
+    }
+
+    private fun inferDefaultPostAuthor(doc: org.jsoup.nodes.Document, minChars: Int): String {
+        doc.select("td[id~=^postmessage_\\d+$], div[id~=^postmessage_\\d+$]").forEach { node ->
+            val author = extractPostAuthor(postContainerFor(node))
+            if (author.isBlank()) {
+                return@forEach
+            }
+            val text = runCatching { textFromContentNode(node) }.getOrDefault("")
+            if (text.replace(Regex("\\s+"), "").length >= minChars || text.isBlank()) {
+                return author
+            }
+        }
+        return ""
+    }
+
+    private fun extractAuthorPostsFromDoc(
+        doc: org.jsoup.nodes.Document,
+        threadUrl: String,
+        author: String,
+        minChars: Int,
+        startIndex: Int
+    ): List<Chapter> {
+        val chapters = mutableListOf<Chapter>()
+        val tid = extractTid(threadUrl)
+        doc.select("td[id~=^postmessage_\\d+$], div[id~=^postmessage_\\d+$]").forEach { node ->
+            val pid = Regex("^postmessage_(\\d+)$").find(node.id())?.groupValues?.getOrNull(1).orEmpty()
+            val postAuthor = extractPostAuthor(postContainerFor(node))
+            if (author.isNotBlank() && postAuthor != author) {
+                return@forEach
+            }
+            val text = runCatching { textFromContentNode(node) }.getOrNull() ?: return@forEach
+            if (text.replace(Regex("\\s+"), "").length < minChars) {
+                return@forEach
+            }
+            val index = startIndex + chapters.size + 1
+            val title = guessPostTitle(text, "\u4f5c\u8005\u697c\u5c42 $index")
+            val url = if (tid.isNotBlank()) normalizeUrl("forum.php?mod=viewthread&tid=$tid&pid=$pid") else normalizeUrl(threadUrl)
+            chapters += Chapter(title = title, url = url, pid = pid)
+        }
+        return chapters
+    }
+
+    private fun guessPostTitle(text: String, fallback: String): String {
+        val heading = Regex("^(?:\\u7b2c?\\s*[\\u4e00\\u4e8c\\u4e09\\u56db\\u4e94\\u516d\\u4e03\\u516b\\u4e5d\\u5341\\u767e\\u5343\\u3007\\u96f6\\u4e24\\d]+(?:\\u53c8[\\u4e00\\u4e8c\\u4e09\\u56db\\u4e94\\u516d\\u4e03\\u516b\\u4e5d\\u5341\\u767e\\u5343\\u3007\\u96f6\\u4e24\\d]+\\u5206\\u4e4b[\\u4e00\\u4e8c\\u4e09\\u56db\\u4e94\\u516d\\u4e03\\u516b\\u4e5d\\u5341\\u767e\\u5343\\u3007\\u96f6\\u4e24\\d]+)?|\\u756a\\u5916(?:[\\u4e00\\u4e8c\\u4e09\\u56db\\u4e94\\u516d\\u4e03\\u516b\\u4e5d\\u5341\\u767e\\u5343\\u3007\\u96f6\\u4e24\\d]+)?|\\u5c3e\\u58f0(?:[\\u4e00\\u4e8c\\u4e09\\u56db\\u4e94\\u516d\\u4e03\\u516b\\u4e5d\\u5341\\u767e\\u5343\\u3007\\u96f6\\u4e24\\d]+)?|\\u540e\\u8bb0|\\u5e8f\\u7ae0|\\u7ec8\\u7ae0)\\s*[\\u3001.\\uff0e\\s].{0,80}$")
+        text.lineSequence().take(18).forEach { line ->
+            val candidate = line.trim()
+            if (candidate.isNotBlank() && heading.matches(candidate)) {
+                return candidate.take(80)
+            }
+        }
+        return fallback
+    }
+
     private fun extractChaptersFromElement(scope: Element): List<Chapter> {
         val chapters = mutableListOf<Chapter>()
         val seen = mutableSetOf<String>()
@@ -1546,7 +1700,7 @@ class YamiboClient(
 
     private fun textFromContentNode(node: Element): String {
         val cloned = node.clone()
-        cloned.select("i.pstatus, script, style").remove()
+        cloned.select("i.pstatus, .pstatus, script, style, .quote, .blockquote, .attach_nopermission, .locked, .ignore_js_op, .aimg_tip, .tip").remove()
 
         var text = cloned.wholeText()
             .replace("\r\n", "\n")
